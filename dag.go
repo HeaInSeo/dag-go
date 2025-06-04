@@ -501,10 +501,6 @@ func (dag *Dag) AddEdge(from, to string) error {
 		return err
 	}
 
-	// 자식과 부모 관계 설정
-	fromNode.children = append(fromNode.children, toNode)
-	toNode.parent = append(toNode.parent, fromNode)
-
 	// 엣지 생성 및 검증
 	edge, check := dag.createEdge(fromNode.ID, toNode.ID)
 	if check == Fault || check == Exist {
@@ -513,6 +509,10 @@ func (dag *Dag) AddEdge(from, to string) error {
 	if edge == nil {
 		return logErr(fmt.Errorf("vertex is nil"))
 	}
+
+	// 자식과 부모 관계 설정은 엣지 생성이 성공한 후에 수행
+	fromNode.children = append(fromNode.children, toNode)
+	toNode.parent = append(toNode.parent, fromNode)
 
 	fromNode.childrenVertex = append(fromNode.childrenVertex, edge.safeVertex)
 	toNode.parentVertex = append(toNode.parentVertex, edge.safeVertex)
@@ -559,10 +559,6 @@ func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
 		return err
 	}
 
-	// 자식과 부모 관계 설정
-	fromNode.children = append(fromNode.children, toNode)
-	toNode.parent = append(toNode.parent, fromNode)
-
 	// 엣지 생성 및 검증
 	edge, check := dag.createEdge(fromNode.ID, toNode.ID)
 	if check == Fault || check == Exist {
@@ -571,6 +567,10 @@ func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
 	if edge == nil {
 		return logErr(fmt.Errorf("vertex is nil"))
 	}
+
+	// 자식과 부모 관계 설정은 엣지 생성이 성공한 후에 수행
+	fromNode.children = append(fromNode.children, toNode)
+	toNode.parent = append(toNode.parent, fromNode)
 
 	fromNode.childrenVertex = append(fromNode.childrenVertex, edge.safeVertex)
 	toNode.parentVertex = append(toNode.parentVertex, edge.safeVertex)
@@ -594,10 +594,6 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error {
 		return logErr(fmt.Errorf("toNode is nil"))
 	}
 
-	// 부모-자식 관계 설정
-	fromNode.children = append(fromNode.children, toNode)
-	toNode.parent = append(toNode.parent, fromNode)
-
 	// 엣지 생성 및 체크
 	edge, check := dag.createEdge(fromNode.ID, toNode.ID)
 	if check == Fault || check == Exist {
@@ -606,6 +602,10 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error {
 	if edge == nil {
 		return logErr(fmt.Errorf("vertex is nil"))
 	}
+
+	// 부모-자식 관계 설정은 엣지 생성이 성공한 후에 수행
+	fromNode.children = append(fromNode.children, toNode)
+	toNode.parent = append(toNode.parent, fromNode)
 
 	// 엣지의 vertex를 양쪽 노드에 추가
 	fromNode.childrenVertex = append(fromNode.childrenVertex, edge.safeVertex)

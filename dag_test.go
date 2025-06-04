@@ -276,6 +276,13 @@ func TestAddEdge(t *testing.T) {
 	if err == nil {
 		t.Error("expected error on duplicate edge creation, got nil")
 	}
+	// 관계가 중복 추가되지 않았는지 확인
+	if len(node1.children) != 1 {
+		t.Errorf("expected node1 to have 1 child after duplicate edge, got %d", len(node1.children))
+	}
+	if len(node2.parent) != 1 {
+		t.Errorf("expected node2 to have 1 parent after duplicate edge, got %d", len(node2.parent))
+	}
 }
 
 // TestCopyDag 는 copyDag 함수가 노드 ID, 부모/자식 구조를 올바르게 복사하는지 검증하는 단위 테스트입니다.
