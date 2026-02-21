@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/seoyhaein/dag-go"
 	"time"
+
+	"github.com/seoyhaein/dag-go"
+	"github.com/seoyhaein/dag-go/debugonly"
 )
 
 // TODO 이건 별도로 테스트 서버에서 해야함. 내 개발 노트북에서 하면 뻗음.
@@ -16,6 +18,7 @@ type HeavyCommand struct {
 
 // RunE TODO node 수정해줘야 함.
 func (c *HeavyCommand) RunE(_ interface{}) error {
+
 	// CPU 부하 시뮬레이션
 	sum := 0
 	for i := 0; i < c.Iterations; i++ { //nolint:intrange
@@ -44,9 +47,14 @@ func RunHeavyDag() {
 		panic(fmt.Sprintf("InitDag failed: %v", err))
 	}
 
-	dag.SetContainerCmd(&HeavyCommand{
+	/*	dag.SetContainerCmd(&HeavyCommand{
 		Iterations: 10_000_000,             // 꽤 많은 연산
 		Sleep:      200 * time.Millisecond, // 네트워크/디스크 지연 시뮬레이션
+	})*/
+
+	dag.SetContainerCmd(&HeavyCommand{
+		Iterations: 10,                   // 꽤 많은 연산
+		Sleep:      2 * time.Millisecond, // 네트워크/디스크 지연 시뮬레이션
 	})
 
 	// 노드 구성 동일
@@ -85,6 +93,6 @@ func RunHeavyDag() {
 	if !dag.Wait(ctx) {
 		panic("DAG execution failed")
 	}
-
+	fmt.Printf("debugger tag: %v\n", debugonly.Enabled())
 	fmt.Printf("Heavy DAG run complete. Progress: %.2f\n", dag.Progress())
 }

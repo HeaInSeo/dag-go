@@ -3,15 +3,15 @@ package dag_go
 import (
 	"context"
 	"fmt"
-	"golang.org/x/sync/errgroup"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	// (do not erase) goroutine 디버깅용
-	"github.com/dlsniper/debugger"
+	"github.com/seoyhaein/dag-go/debugonly"
+	"golang.org/x/sync/errgroup"
 )
 
 // NodeStatus 는 노드의 현재 상태를 나타냄.
@@ -27,9 +27,21 @@ const (
 
 // Node DAG 의 기본 구성 요소
 type Node struct {
-	ID         string
-	ImageName  string
+	ID        string
+	ImageName string
+
+	// deprecated: RunCommand 는 더 이상 사용되지 않음.
 	RunCommand Runnable
+
+	// 추가 : 안전한 동시성 처리: 러너 스냅샷을 위한 atomic.Value
+	// (지우지 말것 ) atomic.Value 는 개발시 주의가 필요함. 해당 내용을 잘 이해하고 있어야함.
+	// 이건 항상 immutable 한 값을 저장하는 용도로만 사용해야 함.
+	// 포인터를 저장하는 용도로만 사용하고, 값 타입은 피할 것.
+	// 반드시 첫 Store는 non-nil : n.runnerVal.Store(&runnerSlot{})처럼 포인터 래퍼 자체는 non-nil이면 OK. (래퍼 내부의 인터페이스 r는 nil이어도 됨)
+	// 복사 금지: atomic.Value는 “첫 사용 이후엔 복사 금지”가 원칙이라, Node를 값 복사하는 패턴은 피하세요(포인터로 다루기).
+	// 동시성: Load/Store는 다중 고루틴에서 동시에 호출해도 안전, CAS 에 관해서는 별도의 노션으로 정리하자.일단 readme 에 남겨둠.
+
+	runnerVal atomic.Value // stores *runnerSlot
 
 	children  []*Node // 자식 노드 리스트
 	parent    []*Node // 부모 노드 리스트
@@ -115,6 +127,7 @@ func (e *NodeError) Unwrap() error {
 }
 
 // preFlight 노드의 실행 전 단계를 처리함
+// TODO preFlight의 30초 하드코딩 타임아웃 이거 개선해야 함.
 func preFlight(ctx context.Context, n *Node) *printStatus {
 	if n == nil {
 		return newPrintStatus(PreflightFailed, noNodeID)
@@ -141,13 +154,32 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 			Log.Fatalf("preFlight: n.parentVertex[%d] is nil for node %s", k, n.ID)
 		}
 		try = eg.TryGo(func() error {
+			nodeID, chIdx := n.ID, k
+			// 라벨을 먼저 걸고
+			lbl := pprof.Labels(
+				"phase", "preFlight",
+				"nodeId", nodeID,
+				"channelIndex", strconv.Itoa(chIdx),
+			)
+
+			pprof.SetGoroutineLabels(pprof.WithLabels(egCtx, lbl)) // 현재 고루틴에 라벨 즉시 적용
+
+			// 원하는 지점에서 중단
+			if nodeID == "C" {
+				debugonly.BreakHere() // // cli 실행 시점에서는 이게 멈춤.
+			}
+
+			if nodeID == "node1" && chIdx == 2 {
+				debugonly.BreakHere() // 다른 코드에서 멈춤.
+			}
+
 			// 디버깅 라벨 설정
-			debugger.SetLabels(func() []string {
-				return []string{
-					"preFlight: nodeId", n.ID,
-					"channelIndex", strconv.Itoa(k),
-				}
-			})
+			/*			debugger.SetLabels(func() []string {
+						return []string{
+							"preFlight: nodeId", n.ID,
+							"channelIndex", strconv.Itoa(k),
+						}
+					})*/
 			select {
 			// 내부 채널을 통해 값을 읽어온다.
 			case result := <-sc.GetChannel():
@@ -187,6 +219,7 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 }
 
 // inFlight 노드의 실행 단계를 처리
+// TODO context 적용해줘야 함.
 func inFlight(n *Node) *printStatus {
 	if n == nil {
 		return newPrintStatus(InFlightFailed, noNodeID)
@@ -214,7 +247,7 @@ func inFlight(n *Node) *printStatus {
 		Log.Println("Skipping execution for node", n.ID, "due to previous failure")
 	}
 
-	// 최종 결과 판단: 일반 노드의 경우에만 succeed 값을 비교합니다.
+	// 최종 결과 판단: 일반 노드의 경우에만 succeed 값을 비교
 	if n.IsSucceed() {
 		Log.Println("InFlight", n.ID)
 		return newPrintStatus(InFlight, n.ID)
@@ -259,36 +292,38 @@ func postFlight(n *Node) *printStatus {
 
 // createNode 새로운 노드를 생성
 func createNode(id string, r Runnable) *Node {
-	return &Node{
-		ID:         id,
-		RunCommand: r,
-		status:     NodeStatusPending,
-	}
+	n := &Node{ID: id, status: NodeStatusPending}
+	n.runnerStore(r) // 첫 Store (non-nil 포인터 래퍼)
+	return n
 }
 
 // createNodeWithID ID 만으로 새로운 노드를 생성
 func createNodeWithID(id string) *Node {
-	return &Node{
-		ID:     id,
-		status: NodeStatusPending,
-	}
+	n := &Node{ID: id, status: NodeStatusPending}
+	n.runnerStore(nil) // 첫 Store (nil 러너라도 래퍼는 non-nil)
+	return n
 }
 
 // TODO 생각해보기 timeout 은 여기 들어가야 하는게 맞을듯.
 
 // Execute 노드의 실행 로직을 구현
-func (n *Node) Execute() (err error) {
-	if n.RunCommand != nil {
-		err = execute(n)
-		return
-	}
-	return nil
+func (n *Node) Execute() error {
+	return execute(n)
 }
 
 // execute RunCommand 실행
 func execute(this *Node) error {
-	err := this.RunCommand.RunE(this)
-	return err
+	r := this.getRunnerSnapshot() // 실행 직전 러너 스냅샷
+	if r == nil {
+		return ErrNoRunner // 명시적 실패 가드
+	}
+	return r.RunE(this)
+}
+
+func (n *Node) notifyChildren(st runningStatus) {
+	for _, sc := range n.childrenVertex {
+		_ = sc.Send(st)
+	}
 }
 
 // checkVisit 모든 노드가 방문되었는지 확인함
