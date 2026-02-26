@@ -5,12 +5,13 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/seoyhaein/dag-go"
+	dag_go "github.com/seoyhaein/dag-go"
 	"github.com/seoyhaein/dag-go/debugonly"
 )
 
 // TODO 이건 별도로 테스트 서버에서 해야함. 내 개발 노트북에서 하면 뻗음.
 
+// HeavyCommand simulates a CPU-and-IO-intensive workload for DAG load testing.
 type HeavyCommand struct {
 	Iterations int           // 반복 연산 횟수
 	Sleep      time.Duration // 부하 시뮬레이션용 sleep 시간
@@ -41,6 +42,7 @@ func main() {
 	RunHeavyDag()
 }
 
+// RunHeavyDag constructs and executes a multi-node DAG with HeavyCommand runners for load testing.
 func RunHeavyDag() {
 	dag, err := dag_go.InitDag()
 	if err != nil {

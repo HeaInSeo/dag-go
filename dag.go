@@ -15,6 +15,7 @@ import (
 
 // ==================== 상수 정의 ====================
 
+// Create, Exist, Fault are the result codes returned by createEdge.
 const (
 	Create createEdgeErrorType = iota
 	Exist
@@ -35,6 +36,8 @@ const (
 	Succeed
 )
 
+// StartNode and EndNode are the reserved IDs for the synthetic entry and exit nodes
+// that are automatically created by StartDag and FinishDag respectively.
 const (
 	StartNode = "start_node"
 	EndNode   = "end_node"
@@ -184,13 +187,13 @@ func (dag *Dag) SetContainerCmd(r Runnable) {
 }
 
 // loadDefaultRunnerAtomic 추가
-/*func (dag *Dag) loadDefaultRunnerAtomic() Runnable {
+/* func (dag *Dag) loadDefaultRunnerAtomic() Runnable {
 	v := dag.defVal.Load()
 	if v == nil {
 		return nil
 	}
 	return v.(*runnerSlot).r
-}*/
+} */
 
 // SetRunnerResolver  Dag 에 Resolver 보관
 func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
@@ -203,7 +206,7 @@ func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
 }
 
 // 원자적으로 Resolver 반환
-/*func (dag *Dag) loadRunnerResolverAtomic() RunnerResolver {
+/* func (dag *Dag) loadRunnerResolverAtomic() RunnerResolver {
 	// rrVal은 단지 "초기화 여부"를 위한 타입 고정용이고,
 	// 실제 rr는 락으로 보호된 dag.runnerResolver에서 읽는다.
 	// TODO 완전히 락-프리로 하려면 rrVal에 rr 자체를 담는 별도 래퍼 타입을 써야 함.
@@ -211,8 +214,10 @@ func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
 	rr := dag.runnerResolver
 	dag.mu.RUnlock()
 	return rr
-}*/
+} */
 
+// SetNodeRunner sets the runner for the node with the given id.
+// Returns false if the node does not exist or is not in Pending status.
 func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
 	dag.mu.RLock()
 	n := dag.nodes[id]
@@ -228,8 +233,8 @@ func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
 	case NodeStatusPending:
 
 		n.SetRunner(r)
-		//n.RunCommand = r
-		//n.runnerStore(r) // atomic.Value에는 *runnerSlot만 Store
+		// n.RunCommand = r
+		// n.runnerStore(r) // atomic.Value에는 *runnerSlot만 Store
 		return true
 
 	case NodeStatusRunning, NodeStatusSucceeded, NodeStatusFailed, NodeStatusSkipped:
@@ -244,6 +249,8 @@ func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
 	}
 }
 
+// SetNodeRunners bulk-sets runners from a map of node-id to Runnable.
+// Returns the count of applied runners, and slices of missing/skipped node ids.
 func (dag *Dag) SetNodeRunners(m map[string]Runnable) (applied int, missing, skipped []string) {
 	dag.mu.RLock()
 	defer dag.mu.RUnlock()
@@ -281,7 +288,7 @@ func (dag *Dag) SetNodeRunners(m map[string]Runnable) (applied int, missing, ski
 		}
 		n.mu.Unlock()
 	}
-	return
+	return applied, missing, skipped
 }
 
 // InitDagWithOptions creates and initializes a new DAG with options.
@@ -451,6 +458,8 @@ func (dag *Dag) createEdge(parentID, childID string) (*Edge, createEdgeErrorType
 }
 
 // closeChannels safely closes all channels in the DAG.
+//
+//nolint:gocognit // iterates over three independent channel slices; each branch is simple but overall count is high
 func (dag *Dag) closeChannels() {
 	for _, edge := range dag.Edges {
 		if edge.safeVertex != nil {
@@ -512,6 +521,7 @@ func (dag *Dag) CreateNode(id string) *Node {
 	return dag.createNode(id)
 }
 
+// CreateNodeWithTimeOut creates a node that applies a per-node timeout when bTimeOut is true.
 func (dag *Dag) CreateNodeWithTimeOut(id string, bTimeOut bool, ti time.Duration) *Node {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
@@ -534,7 +544,7 @@ func (dag *Dag) createNode(id string) *Node {
 	} else {
 		node = createNodeWithID(id)
 	}
-	//node.runnerStore(dag.ContainerCmd)
+	// node.runnerStore(dag.ContainerCmd)
 	// 추가 초기 스토어: 기본 러너가 없어도 &runnerSlot{}로 non-nil 보장
 	node.runnerStore(nil)
 	node.parentDag = dag
@@ -736,6 +746,8 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error {
 }
 
 // FinishDag finalizes the DAG by connecting end nodes and validating the structure.
+//
+//nolint:gocognit // DAG finalization requires multiple sequential validation steps; splitting would obscure the overall flow
 func (dag *Dag) FinishDag() error {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
@@ -854,7 +866,7 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 	dag.workerPool = NewDagWorkerPool(maxWorkers)
 
 	// 각 노드별로 SafeChannel[*printStatus]를 생성하여 safeChs 슬라이스에 저장한다.
-	var safeChs []*SafeChannel[*printStatus]
+	safeChs := make([]*SafeChannel[*printStatus], 0, n)
 
 	for _, v := range dag.nodes {
 		nd := v // 캡처 문제 방지
@@ -899,6 +911,8 @@ func (dag *Dag) Start() bool {
 }
 
 // Wait waits for the DAG execution to complete.
+//
+//nolint:gocognit // fan-in select loop must handle merge result, node status stream, and context cancellation simultaneously
 func (dag *Dag) Wait(ctx context.Context) bool {
 	// DAG 종료 시 채널들을 안전하게 닫는다.
 	defer dag.closeChannels()
@@ -1117,6 +1131,8 @@ func minInt(a, b int) int {
 	return b
 }
 
+// CopyDag creates a structural copy of the original DAG with a new ID.
+// The copy shares the same ContainerCmd and timeout settings but has independent channels.
 func CopyDag(original *Dag, newID string) *Dag {
 	if original == nil {
 		return nil

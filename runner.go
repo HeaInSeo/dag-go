@@ -67,6 +67,8 @@ func (n *Node) getRunnerSnapshot() Runnable {
 	return base
 }
 
+// SetRunner atomically sets the runner for a Pending node.
+// Returns false if the node is not in Pending status.
 func (n *Node) SetRunner(r Runnable) bool {
 	n.mu.Lock()
 	defer n.mu.Unlock()

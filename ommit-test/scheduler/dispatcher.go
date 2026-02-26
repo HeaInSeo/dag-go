@@ -8,6 +8,8 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+// Dispatcher routes RunReq messages to the appropriate Actor, enforcing a global
+// concurrency limit via a semaphore channel.
 type Dispatcher struct {
 
 	// 전역 동시 실행 제한 세마포어.
@@ -20,15 +22,9 @@ type Dispatcher struct {
 	// 라우터...
 	router *Router
 
-	actors sync.Map // sync.Map keeps registry ops lock-free-ish
 	// TODO 일단 해보자.
 	registry  sync.Map
 	registry1 Registry
-
-	// 멱등키 맵(idemToSpan) 보호용 락.
-	// regMu와 분리해 락 경합 줄임(멱등키 조회는 상대적으로 자주 일어남).
-	// 정해진 락 순서: 가능하면 idemMu → regMu 순으로 잡아 데드락 회피.
-	idemMu sync.Mutex
 
 	// IdemKey → spawnId 매핑(멱등성 구현).
 	// 동일 IdemKey로 들어오면 같은 spawnId를 반환해 중복 실행/경쟁 회피.
@@ -41,7 +37,7 @@ type Dispatcher struct {
 	// golang.org/x/sync@v0.12.0 에서 golang.org/x/sync v0.17.0 업데이트 하고 벤더링 함.
 	sf singleflight.Group // optional but handy when creation gets heavy
 
-	// spawnID = RunID + "/" + NodeID
+	// spawnID = RunID + “/” + NodeID
 	// 액터 생성 DI(의존성 주입) 훅.
 	// 테스트에서 가짜 Actor 주입, 메트릭/옵저버블리티 훅 삽입, 다른 구현(예: PodActor/ContainerActor) 스왑 가능.
 	// 기본값은 NewActor.
@@ -52,6 +48,8 @@ type Dispatcher struct {
 	onActorCreate func(spawnID string)
 }
 
+// NewDispatcher creates a Dispatcher limited to maxActors concurrent actors,
+// using the provided Router for CmdRunContainer commands.
 func NewDispatcher(maxActors int, router *Router) *Dispatcher {
 	return &Dispatcher{
 		sem:    make(chan struct{}, maxActors),
@@ -59,6 +57,7 @@ func NewDispatcher(maxActors int, router *Router) *Dispatcher {
 	}
 }
 
+// NewDispatcher1 creates a Dispatcher backed by the given Registry with idempotency support.
 func NewDispatcher1(maxConcurrent int, reg Registry) *Dispatcher {
 	if reg == nil {
 		reg = NewInMemoryRegistry()
@@ -144,6 +143,8 @@ func (d *Dispatcher) getOrCreateActor1(spawnID string) (*Actor, error) {
 	return act, nil
 }
 
+// DispatchRun routes a run request to an actor identified by RunID+NodeID.
+// Returns an error if the actor cannot be created or the mailbox is full.
 func (d *Dispatcher) DispatchRun(req RunReq, sink EventSink) error {
 	spawnID := sessionKeyOf(req) // 정책: 노드 단위 직렬화 (RunID/NodeID)
 	act, err := d.getOrCreateActor(spawnID)

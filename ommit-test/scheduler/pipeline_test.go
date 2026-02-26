@@ -143,6 +143,7 @@ func TestParsePipeline_JSONC_SetsIDs(t *testing.T) {
 	}
 }
 
+//nolint:gocognit // validates all node/dependency invariants after parsing; each check is simple but total path count is high
 func TestParsePipeline0(t *testing.T) {
 	p, err := ParsePipelineFile("../pipeline.jsonc")
 	if err != nil {

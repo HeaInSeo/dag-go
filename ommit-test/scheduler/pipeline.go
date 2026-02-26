@@ -25,12 +25,13 @@ type Pipeline struct {
 type Node struct {
 	ID   string `json:"-"`    // derived from key in Nodes
 	Type string `json:"type"` // "start" | "task" | "end" (extensible)
-	//UI UINode `json:"ui"`
+	// UI UINode `json:"ui"`
 	Graph GraphSpec `json:"graph"`
-	//Storage StorageSpec `json:"storage"`
-	//Container ContainerSpec `json:"container"`
+	// Storage StorageSpec `json:"storage"`
+	// Container ContainerSpec `json:"container"`
 }
 
+// GraphSpec holds the dependency edges for a pipeline node.
 type GraphSpec struct {
 	DependsOn []string            `json:"dependsOn"`
 	depSet    map[string]struct{} // 내부용
@@ -83,6 +84,8 @@ func ParsePipelineFile(path string) (*Pipeline, error) {
 // stripJSONComments removes // line comments and /* ... */ block comments while
 // preserving content inside JSON strings. It does not implement full JSON5;
 // trailing commas are still invalid. This is sufficient for typical JSONC.
+//
+//nolint:gocognit,gocyclo // byte-by-byte JSON comment stripper; state machine complexity is inherent to the algorithm
 func stripJSONComments(in []byte) []byte {
 	var out bytes.Buffer
 	inStr := false
@@ -144,6 +147,9 @@ func stripJSONComments(in []byte) []byte {
 	return out.Bytes()
 }
 
+// NormalizeDepends validates and deduplicates DependsOn lists for all pipeline nodes.
+//
+//nolint:gocognit // iterates all nodes with multi-step validation; each check is simple but total branch count is high
 func NormalizeDepends(p *Pipeline) error {
 	if p == nil || len(p.Nodes) == 0 {
 		return errors.New("invalid pipeline")

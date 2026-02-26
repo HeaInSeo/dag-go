@@ -13,7 +13,10 @@ import (
 // scheduler 와 grpc 통신 해줘야 함.
 // task 를 가져올때, executor 에서 pull 하는 방식으로 해야 안정적임.
 
-// BuildDagFromPipeline ParsePipeline로 얻은 *Pipeline을 DAG로 변환
+// BuildDagFromPipeline converts a parsed *Pipeline into an initialized *dag_go.Dag.
+// ParsePipeline로 얻은 *Pipeline을 DAG로 변환
+//
+//nolint:gocognit,gocyclo // pipeline-to-DAG translation requires sequential validation of init/finalize/root/leaf topology
 func BuildDagFromPipeline(p *Pipeline, dagOpts ...dag_go.DagOption) (*dag_go.Dag, error) {
 	if p == nil || len(p.Nodes) == 0 {
 		return nil, errors.New("pipeline is nil or empty")

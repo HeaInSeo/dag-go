@@ -13,7 +13,7 @@ func noLeakActor(spawnID string, counter *int32) *Actor {
 }
 
 // maxConcurrent는 동시에 유지 가능한 액터 수이므로, “노드/컨테이너 동시 실행 상한”과 맞춰 잡아줘.
-//idemToSpan은 장기 운영 시 메모리 누수 방지 위해 TTL/청소 루틴을 붙이거나, 별도 IdemStore 인터페이스로 빼서 Redis 같은 외부 스토어로 이동하는 걸 추천.
+// idemToSpan은 장기 운영 시 메모리 누수 방지 위해 TTL/청소 루틴을 붙이거나, 별도 IdemStore 인터페이스로 빼서 Redis 같은 외부 스토어로 이동하는 걸 추천.
 
 func TestGetOrCreateActor01(t *testing.T) {
 	reg := NewInMemoryRegistry()

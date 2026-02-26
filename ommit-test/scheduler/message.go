@@ -26,8 +26,8 @@ type RunRespEvent struct {
 	SpawnID string
 }
 
-// NewRunReq 일단 이렇게 만들어놈. RunReq 값으로 처리했는데 불변성에 대한 요구도가 큰지 아니면 효율적인 측면이 큰지는 생각해보자.
-
+// NewRunReq constructs a RunReq, initializing params to an empty map if nil.
+// RunReq 값으로 처리했는데 불변성에 대한 요구도가 큰지 아니면 효율적인 측면이 큰지는 생각해보자.
 func NewRunReq(runID, nodeID, idemKey string, params map[string]string) RunReq {
 	if params == nil {
 		params = make(map[string]string, 4)
@@ -40,8 +40,8 @@ func NewRunReq(runID, nodeID, idemKey string, params map[string]string) RunReq {
 	}
 }
 
-/*func ReceiveFromExecutor(d *Dispatcher, req RunReq, sink EventSink) error {
+/* func ReceiveFromExecutor(d *Dispatcher, req RunReq, sink EventSink) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return d.DispatchRun(ctx, &req, sink)
-}*/
+} */

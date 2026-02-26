@@ -1,5 +1,6 @@
 package dag_go
 
+// ErrorType identifies the DAG operation that produced a systemError.
 type (
 	ErrorType int
 
@@ -9,6 +10,8 @@ type (
 	}
 )
 
+// AddEdge, StartDag, AddEdgeIfNodesExist, addEndNode, FinishDag are the
+// ErrorType values that identify which DAG operation recorded an error.
 const (
 	AddEdge ErrorType = iota
 	StartDag

@@ -61,7 +61,7 @@ func TestInitDag(t *testing.T) {
 type DummyRunnable struct{}
 
 // DummyRunnable 이 Runnable 인터페이스를 구현하도록 필요한 메서드들을 정의
-func (_ DummyRunnable) RunE(_ interface{}) error {
+func (DummyRunnable) RunE(_ interface{}) error {
 	return nil
 }
 
@@ -190,6 +190,8 @@ func TestCreateEdge(t *testing.T) {
 }
 
 // TestCreateEdge 이게 성공해야지 의미가 있음.
+//
+//nolint:gocognit,gocyclo // comprehensive edge test covering many validation paths in a single test function
 func TestAddEdge(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	// 새로운 Dag 인스턴스 생성 (NewDag 사용)
@@ -430,7 +432,7 @@ func TestManyCopyDags(t *testing.T) {
 // 복사본에 데이터를 새롭게 넣었는데 만약 원본 DAG 의 내용이 변경한 복사본과 같아지면 shallow copy 이기때문에 에러남.
 // copyDag 에서 shallow copy 가 일어나는 곳은 아예 복사를 하지 않는다.
 //
-//nolint:funlen // 이 테스트는 길지만 의도적으로 유지함
+//nolint:funlen,gocognit,gocyclo // 이 테스트는 길지만 의도적으로 유지함
 func TestCopyDagIndependence(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	// 1. 원본 DAG 생성 및 초기화
@@ -722,7 +724,7 @@ func TestSimple1Dag(t *testing.T) {
 // 간단한 실행 명령을 위한 인터페이스 구현
 type SimpleCommand struct{}
 
-func (_ *SimpleCommand) RunE(_ interface{}) error {
+func (*SimpleCommand) RunE(_ interface{}) error {
 	// 간단한 작업 시뮬레이션
 	time.Sleep(100 * time.Millisecond)
 	return nil
@@ -947,6 +949,8 @@ func generateDAG(numNodes int, edgeProb float64) *Dag {
 
 // verifyCopiedDag 는 원본 DAG 와 복사된 노드 맵 및 간선 슬라이스가 동일한 구조를 갖는지 검증
 // 문제가 있으면 에러 메시지를 모아 하나의 error 로 반환하고, 문제가 없으면 nil 을 반환
+//
+//nolint:gocognit,gocyclo // exhaustive structural verification helper; complexity comes from checking all node/edge fields
 func verifyCopiedDag(original *Dag, newNodes map[string]*Node, newEdges []*Edge, methodName string) error {
 	var errs []string
 

@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -29,6 +28,8 @@ func degrees(p *Pipeline) (map[string]int, map[string]int) {
 
 // TestBuildDagFromPipeline0 기본 파이프라인 파일로부터 DAG 생성 테스트
 // 일단, dag 생성만 검증하였음. TODO 이후 dag 를 실행하는 부분도 테스트 필요.
+//
+//nolint:gocognit,gocyclo // comprehensive wiring validation test; each assertion is simple but total path count is high
 func TestBuildDagFromPipeline0(t *testing.T) {
 	// 1) parse
 	p, err := ParsePipelineFile("../pipeline.jsonc")
@@ -140,18 +141,6 @@ func (r echoOK) RunE(a interface{}) error {
 	return nil
 }
 
-type echoFail struct{ d time.Duration }
-
-func (r echoFail) RunE(a interface{}) error {
-	id := "<unknown>"
-	if n, ok := a.(*dag_go.Node); ok && n != nil {
-		id = n.ID
-	}
-	fmt.Printf("[RunE FAIL] node=%s sleep=%s\n", id, r.d)
-	time.Sleep(r.d)
-	return errors.New("mock failure")
-}
-
 // start_node -> init -> 1 -> 2 -> 5  -> 6 - fin -> end_node
 //                         -> 3       -> 6
 //                         -> 4       -> 6
@@ -224,7 +213,7 @@ func TestDAG_Simple(t *testing.T) {
 
 	// 노드별 주입: B2만 더 긴 딜레이로 오버라이드(실행 시 node=B2 출력)
 	b2.SetRunner(echoOK{d: 300 * time.Millisecond})
-	//b2.RunCommand = echoOK{d: 300 * time.Millisecond}
+	// b2.RunCommand = echoOK{d: 300 * time.Millisecond}
 
 	// 실행
 	if err := dag.FinishDag(); err != nil {
