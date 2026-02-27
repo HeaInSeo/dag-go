@@ -167,7 +167,7 @@ linters:
     paths:
       - third_party$
       - builtin$
-      - examples$
+      - ^examples
 
 # ------------------------------------------------------------------------------
 # Formatters
@@ -182,4 +182,4 @@ formatters:
     paths:
       - third_party$
       - builtin$
-      - examples$
+      - ^examples

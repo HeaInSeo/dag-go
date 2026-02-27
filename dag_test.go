@@ -1013,6 +1013,8 @@ func TestComplexDagProgress(t *testing.T) {
 
 // TestDagReset verifies that a DAG can be executed a second time after Reset()
 // returns the same result as the first run.
+//
+//nolint:gocognit // comprehensive reset lifecycle test: closure + node-status loop + two full run cycles
 func TestDagReset(t *testing.T) {
 	defer goleak.VerifyNone(t)
 

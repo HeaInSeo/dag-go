@@ -1199,8 +1199,10 @@ func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool {
 func detectCycle(dag *Dag) bool {
 	// copyDag 는 최소 정보만 복사하므로, 사이클 검사에 적합
 	newNodes, _ := copyDag(dag)
-	visited := make(map[string]bool)
-	recStack := make(map[string]bool)
+	// Pre-size both maps to the node count so the DFS traversal causes no
+	// rehash growth even when every node is visited once.
+	visited := make(map[string]bool, len(newNodes))
+	recStack := make(map[string]bool, len(newNodes))
 
 	for _, node := range newNodes {
 		if !visited[node.ID] {
@@ -1386,32 +1388,12 @@ func (dag *Dag) ToMermaid() string {
 	sb.WriteString("graph TD\n")
 
 	// First pass — emit a labelled node definition for every node that appears
-	// in at least one edge.  Tracking emitted IDs prevents duplicate definitions
-	// when the same node appears as both parent and child in different edges.
-	defined := make(map[string]bool)
+	// in at least one edge.  Pre-sizing the map to the number of known nodes
+	// avoids rehash growth on graphs where every node participates in an edge.
+	defined := make(map[string]bool, len(dag.nodes))
 	for _, edge := range dag.Edges {
-		for _, nodeID := range [2]string{edge.parentID, edge.childID} {
-			if defined[nodeID] {
-				continue
-			}
-			defined[nodeID] = true
-			mID := mermaidSafeID(nodeID)
-			n := dag.nodes[nodeID]
-			switch nodeID {
-			case StartNode, EndNode:
-				// Stadium shape visually distinguishes synthetic infrastructure nodes.
-				fmt.Fprintf(&sb, "    %s([\"%s\"])\n", mID, nodeID)
-			default:
-				label := nodeID
-				if n != nil {
-					if r := n.runnerLoad(); r != nil {
-						// Append the concrete runner type as a diagnostic hint.
-						label = fmt.Sprintf("%s\\n%T", nodeID, r)
-					}
-				}
-				fmt.Fprintf(&sb, "    %s[\"%s\"]\n", mID, label)
-			}
-		}
+		dag.writeMermaidNode(&sb, edge.parentID, defined)
+		dag.writeMermaidNode(&sb, edge.childID, defined)
 	}
 
 	// Second pass — emit directed edges.
@@ -1422,6 +1404,38 @@ func (dag *Dag) ToMermaid() string {
 	}
 
 	return sb.String()
+}
+
+// writeMermaidNode emits a single Mermaid node definition into sb unless the
+// node has already been defined (tracked via the defined map).
+// Synthetic nodes (start_node / end_node) use the stadium shape; all others
+// use the default rectangle.  Caller must hold dag.mu at least for reading.
+func (dag *Dag) writeMermaidNode(sb *strings.Builder, nodeID string, defined map[string]bool) {
+	if defined[nodeID] {
+		return
+	}
+	defined[nodeID] = true
+	mID := mermaidSafeID(nodeID)
+	switch nodeID {
+	case StartNode, EndNode:
+		// Stadium shape visually distinguishes synthetic infrastructure nodes.
+		fmt.Fprintf(sb, "    %s([\"%s\"])\n", mID, nodeID)
+	default:
+		fmt.Fprintf(sb, "    %s[\"%s\"]\n", mID, mermaidNodeLabel(nodeID, dag.nodes[nodeID]))
+	}
+}
+
+// mermaidNodeLabel returns the display label for a Mermaid node box.
+// When a per-node Runnable has been registered via SetNodeRunner, its concrete
+// Go type is appended after a line-break as a diagnostic hint visible in the
+// rendered diagram.
+func mermaidNodeLabel(nodeID string, n *Node) string {
+	if n != nil {
+		if r := n.runnerLoad(); r != nil {
+			return fmt.Sprintf("%s\\n%T", nodeID, r)
+		}
+	}
+	return nodeID
 }
 
 // mermaidSafeID converts an arbitrary node ID to a Mermaid-safe identifier by
@@ -1513,6 +1527,10 @@ func copyDag(original *Dag) (map[string]*Node, []*Edge) {
 	// 2. 원본 노드의 부모/자식 관계를 이용하여 새 노드들의 포인터 연결
 	for _, n := range original.nodes {
 		newNode := newNodes[n.ID]
+		// Pre-allocate slices to the exact capacity needed so each append
+		// below copies at most one node pointer without triggering a grow.
+		newNode.parent = make([]*Node, 0, len(n.parent))
+		newNode.children = make([]*Node, 0, len(n.children))
 		// 부모 노드 연결
 		for _, parent := range n.parent {
 			if copiedParent, ok := newNodes[parent.ID]; ok {
