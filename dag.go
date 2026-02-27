@@ -81,6 +81,12 @@ type DagConfig struct {
 	// ErrorDrainTimeout is the maximum time collectErrors will wait to drain the
 	// Errors channel.  Defaults to 5 s when left at zero (see DefaultDagConfig).
 	ErrorDrainTimeout time.Duration
+
+	// ExpectedNodeCount is a capacity hint for the internal nodes map and the
+	// Edges slice.  When the final node count is known upfront, setting this
+	// field avoids incremental map rehashing and slice growth during AddEdge
+	// calls.  Zero means let the runtime decide the initial capacity.
+	ExpectedNodeCount int
 }
 
 // DagOption is a functional-option type for NewDagWithOptions.
@@ -206,8 +212,10 @@ func NewDag() *Dag {
 // Prefer InitDag for the common case; use this constructor when you need to
 // customise buffer sizes, timeouts, or the worker pool size before adding nodes.
 func NewDagWithConfig(config DagConfig) *Dag {
+	nodeCapacity := config.ExpectedNodeCount
 	return &Dag{
-		nodes:       make(map[string]*Node),
+		nodes:       make(map[string]*Node, nodeCapacity),
+		Edges:       make([]*Edge, 0, nodeCapacity),
 		ID:          uuid.NewString(),
 		NodesResult: NewSafeChannelGen[*printStatus](config.MaxChannelBuffer),
 		Config:      config,
@@ -1155,20 +1163,44 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 			}
 			// EndNode 에 대한 상태만 체크함.
 			if c.nodeID == EndNode {
-				if c.rStatus == PreflightFailed ||
-					c.rStatus == InFlightFailed ||
-					c.rStatus == PostFlightFailed {
+				// Save fields before returning c to the pool, because
+				// releasePrintStatus zeroes the struct fields.
+				rStatus := c.rStatus
+				releasePrintStatus(c)
+				if rStatus == PreflightFailed ||
+					rStatus == InFlightFailed ||
+					rStatus == PostFlightFailed {
 					return false
 				}
-				if c.rStatus == FlightEnd {
+				if rStatus == FlightEnd {
 					return true
 				}
+			} else {
+				releasePrintStatus(c)
 			}
 		case <-waitCtx.Done():
 			Log.Printf("DAG execution timed out or canceled: %v", waitCtx.Err())
 			return false
 		}
 	}
+}
+
+// dfsState holds the per-traversal book-keeping maps used by detectCycleDFS.
+// Both maps are reused across calls via dfsStatePool to avoid per-call heap
+// allocations; clear() resets entries without freeing the backing memory.
+type dfsState struct {
+	visited  map[string]bool
+	recStack map[string]bool
+}
+
+// dfsStatePool provides reusable dfsState objects for detectCycle.
+var dfsStatePool = sync.Pool{
+	New: func() any {
+		return &dfsState{
+			visited:  make(map[string]bool),
+			recStack: make(map[string]bool),
+		}
+	},
 }
 
 // detectCycleDFS detects cycles using DFS.
@@ -1197,16 +1229,18 @@ func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool {
 // (e.g. by holding dag.mu in any mode).  FinishDag calls this directly because
 // it already holds dag.mu.Lock(); the exported DetectCycle acquires RLock first.
 func detectCycle(dag *Dag) bool {
-	// copyDag 는 최소 정보만 복사하므로, 사이클 검사에 적합
-	newNodes, _ := copyDag(dag)
-	// Pre-size both maps to the node count so the DFS traversal causes no
-	// rehash growth even when every node is visited once.
-	visited := make(map[string]bool, len(newNodes))
-	recStack := make(map[string]bool, len(newNodes))
+	// Acquire a pooled dfsState and reset its maps without freeing backing
+	// memory (clear is O(N) but allocation-free, unlike make).
+	state := dfsStatePool.Get().(*dfsState)
+	clear(state.visited)
+	clear(state.recStack)
+	defer dfsStatePool.Put(state)
 
-	for _, node := range newNodes {
-		if !visited[node.ID] {
-			if detectCycleDFS(node, visited, recStack) {
+	// Traverse dag.nodes directly — no copyDag needed because the caller
+	// guarantees dag.mu is held (FinishDag holds Lock; DetectCycle holds RLock).
+	for _, node := range dag.nodes {
+		if !state.visited[node.ID] {
+			if detectCycleDFS(node, state.visited, state.recStack) {
 				return true
 			}
 		}
@@ -1230,13 +1264,11 @@ func DetectCycle(dag *Dag) bool {
 //nolint:gocognit // three-phase flight state machine with CAS guards; splitting would obscure the node lifecycle
 func connectRunner(n *Node) {
 	n.runner = func(ctx context.Context, result *SafeChannel[*printStatus]) {
-		// copyStatus returns a shallow copy of ps. rStatus (int) and nodeID (string)
-		// are value types, so the copy is independent of the original pool object.
+		// copyStatus acquires a new printStatus from the pool and copies the
+		// value fields of ps into it.  rStatus (int) and nodeID (string) are
+		// value types, so the copy is fully independent of the original.
 		copyStatus := func(ps *printStatus) *printStatus {
-			return &printStatus{
-				rStatus: ps.rStatus,
-				nodeID:  ps.nodeID,
-			}
+			return newPrintStatus(ps.rStatus, ps.nodeID)
 		}
 
 		// CheckParentsStatus internally calls TransitionStatus(Pending, Skipped)

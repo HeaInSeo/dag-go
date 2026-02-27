@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 10 — Examples, Visualisation & v1.0.0 Release Preparation (completed)
+## Current Status: Stage 11 — Data Plane Performance Optimization (completed)
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -126,6 +126,32 @@ Update this file at the start and end of every stage.
 - `go build ./...` — **0 errors** (all examples compile as part of the same module).
 - `go test -race ./...` — **0 data races, all tests pass**.
 
+### Stage 11 — Data Plane Performance Optimization (completed)
+- **`dag.go` (`detectCycle`)**: Eliminated `copyDag` call — now uses `dfsStatePool` (`sync.Pool` of
+  `dfsState{visited, recStack map[string]bool}`) and traverses `dag.nodes` directly.
+  `clear()` (Go 1.21+) resets maps without freeing backing memory.
+  Caller lock guarantee documented: `FinishDag` holds `Lock()`; `DetectCycle` holds `RLock()`.
+- **`dag.go` (`dfsState` / `dfsStatePool`)**: New pooled DFS traversal state added before
+  `detectCycleDFS`.  Both maps pre-allocated at pool-object creation; reused via `clear()`.
+- **`dag.go` (`connectRunner` — `copyStatus`)**: Changed from direct `&printStatus{...}` heap
+  allocation to `newPrintStatus(ps.rStatus, ps.nodeID)` — now routes through `statusPool`.
+- **`dag.go` (`Wait`)**: Added `releasePrintStatus(c)` in all consuming paths of the
+  `NodesResult` case.  `c.rStatus` saved to local variable before release to avoid use-after-free.
+  Non-EndNode statuses also released, closing the pool lifecycle loop.
+- **`dag.go` (`DagConfig`)**: Added `ExpectedNodeCount int` field with godoc.
+- **`dag.go` (`NewDagWithConfig`)**: Uses `ExpectedNodeCount` as capacity hint for
+  `make(map[string]*Node, n)` and `make([]*Edge, 0, n)` — avoids rehash growth for known graphs.
+- **Benchmark results** (before → after on Intel Xeon E5-2683 v4 @ 2.10GHz):
+
+| Benchmark | Before (ns/op) | After (ns/op) | Before (allocs/op) | After (allocs/op) |
+|---|---|---|---|---|
+| DetectCycle/Small  |  7 239 |  1 896 | 50    | **0** |
+| DetectCycle/Medium | 206 041 |  53 976 | 1 279 | **0** |
+| DetectCycle/Large  | 5 822 780 | 1 558 478 | 28 011 | **0** |
+
+- `go test -race ./...` — **0 data races, all tests pass**.
+- `golangci-lint run ./...` — **0 issues**.
+
 ---
 
 ## Pending Items
@@ -159,7 +185,7 @@ Update this file at the start and end of every stage.
 | `Dag.Errors` | `*SafeChannel[error]` | Closed centrally in `closeChannels()`; `Send` is non-blocking |
 | Lock order | `Dag.mu` → `Node.mu` | Never invert; `SetNodeRunner` calls `runnerStore` directly (not `SetRunner`) to avoid re-entrant lock |
 | Runner priority | `Node.runnerVal` > `runnerResolver` > `ContainerCmd` | Resolved at execution time in `getRunnerSnapshot` |
-| Cycle detection | DFS + recStack (white/gray/black) | Called inside `FinishDag`; operates on `copyDag` snapshot |
+| Cycle detection | DFS + `dfsStatePool` (zero-alloc) | `detectCycle` iterates `dag.nodes` directly; `dfsStatePool` provides reusable `visited`/`recStack` maps; `clear()` resets without GC pressure |
 | Status transitions | `TransitionStatus(from, to)` CAS | Validates state-machine edge before lock; `SetStatus` kept for unconditional override only |
 | Error observability | `reportError` uses logrus fields | `dag_id` + `error` fields emitted on drop; `collectErrors` uses `DagConfig.ErrorDrainTimeout` |
 | `DagWorkerPool.Close` | `sync.Once` | `closeOnce.Do(close)` prevents double-close panic; `Submit` keeps blocking send for backpressure |
@@ -169,3 +195,6 @@ Update this file at the start and end of every stage.
 | `Dag.Reset()` | Channel recreation + node state wipe | Must be called only after `Wait` returns; rebuilds edge channels from `dag.Edges` slice so topology is preserved |
 | `CopyDag` | Structural copy | Copies `Config` and allocates new `NodesResult`/`Errors` channels; `workerPool`/`nodeResult`/`errLogs` intentionally not copied |
 | `Dag.ToMermaid()` | Read-only observer | Acquires `dag.mu.RLock()`; emits `graph TD` Mermaid; sanitises node IDs via `mermaidSafeID()`; appends `%T` runner hint when per-node runner is set |
+| `printStatus` pool | `statusPool` (`sync.Pool`) | `newPrintStatus` → `copyStatus` (connectRunner) → `result.Send` → `releasePrintStatus` (Wait); full lifecycle closed in Stage 11 |
+| `dfsStatePool` | `sync.Pool` of `dfsState` | Provides zero-alloc DFS traversal for `detectCycle`; `clear()` resets maps per call |
+| `DagConfig.ExpectedNodeCount` | Capacity hint | Pre-allocates `nodes` map and `Edges` slice in `NewDagWithConfig`; zero = runtime default |
