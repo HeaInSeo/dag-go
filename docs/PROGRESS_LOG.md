@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 6 — README & Error Handling Hardening
+## Current Status: Stage 7 — Performance Optimization & Internal Concurrency Refinement
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -69,7 +69,7 @@ Update this file at the start and end of every stage.
 - `go test -race ./...` — **0 data races detected**.
 - `golangci-lint run ./...` — **0 issues**.
 
-### Stage 6 — README & Error Handling Hardening (current)
+### Stage 6 — README & Error Handling Hardening
 - **`README.md`**: Complete rewrite — Introduction, Key Features table, Quick Start code example,
   DAG Lifecycle diagram, Node State Machine (Mermaid), Configuration reference,
   Per-Node Runner Override section, Error Handling section, Development guide.
@@ -85,27 +85,45 @@ Update this file at the start and end of every stage.
 - `go test -race ./...` — **0 data races detected**.
 - `golangci-lint run ./...` — **0 issues**.
 
+### Stage 7 — Performance Optimization & Internal Concurrency Refinement (current)
+- **`dag.go` (`DagWorkerPool`)**: Added `closeOnce sync.Once` field.
+  `Close()` now wraps `close(taskQueue)` in `closeOnce.Do(...)` — double-close panic eliminated.
+  `Submit()` retains blocking send semantics (backpressure); converting to `SafeChannel` would
+  silently drop tasks on a full queue and was therefore rejected.
+- **`dag.go` (`fanIn`)**: Refactored from `sync.WaitGroup + atomic.int32` to `errgroup.WithContext`.
+  Added `"golang.org/x/sync/errgroup"` import.  No `SetLimit` applied: relay goroutines are
+  I/O-bound (blocked on channel reads) and must all run concurrently; serialising them would
+  increase tail latency with no CPU benefit.
+- **`dag.go` (`Wait`)**: Added documentation comment to `mergeResult` channel explaining its
+  one-shot buffered safety: one writer, one reader, goroutine exits after writing — no close needed.
+- **`dag.go` (`Progress`)**: Extended godoc to document that the two `atomic.LoadInt64` calls
+  (nodeCount + completedCount) do not form an atomic pair.  The ratio may be slightly ahead of
+  reality between loads; acceptable for observability but not for correctness decisions.
+- **`dag.go` (`detectCycle` / `DetectCycle`)**: Split into two functions:
+  - `detectCycle(dag *Dag) bool` — internal, no lock; callers must hold `dag.mu`.
+  - `DetectCycle(dag *Dag) bool` — exported, acquires `dag.mu.RLock()` then delegates.
+  - `FinishDag` updated to call `detectCycle(dag)` directly (already holds write lock),
+    preventing a re-entrant lock attempt that would have deadlocked.
+- `go test -race ./...` — **0 data races detected**.
+- `golangci-lint run ./...` — **0 issues**.
+
 ---
 
 ## Pending Items
 
-### Stage 7 — Error Handling Continuation (planned)
+### Stage 8 — Error Handling Continuation (planned)
 - [ ] `ErrNoRunner` structured error type (currently `errors.New`); add `NodeID` field via `NodeError`.
 - [ ] Add `Dag.ErrCount()` helper to expose current Errors channel depth without draining.
 - [ ] Consider `ErrorPolicy` enum: `FailFast` (current) vs `ContinueOnError`.
 
-### Stage 8 — Performance & Concurrency (planned)
-- [ ] `DagWorkerPool.taskQueue` is a bare `chan func()` — evaluate replacing with `SafeChannel`.
-- [ ] `fanIn` goroutine: each node spawns a goroutine; explore bounded semaphore approach.
-- [ ] `merge` result channel (`mergeResult chan bool`) — evaluate promotion to `SafeChannel[bool]`.
-- [ ] Profile `TestComplexDag` under race detector; verify no data races.
-- [ ] `Progress()` uses two independent `atomic.LoadInt64` calls — not atomic as a pair; document limitation.
-
 ### Stage 9 — Public API Hardening (planned)
-- [ ] `DetectCycle` currently takes a `*Dag` with no lock; document that it must be called only when DAG mutation is complete (post-FinishDag) or add internal locking.
 - [ ] `CopyDag` does not copy `Config` or `workerPool`; document this or fix.
 - [ ] Godoc pass: all exported symbols must have comments (revive:exported rule already enforced).
 - [ ] Evaluate adding `Dag.Reset()` to allow DAG reuse after `Wait` completes.
+
+### Stage 10 — Profiling & Advanced Optimisation (planned)
+- [ ] Profile `TestComplexDag` under race detector; identify hot paths.
+- [ ] Evaluate bounded semaphore for `preFlight` errgroup (currently hard-coded limit of 10).
 
 ---
 
@@ -120,3 +138,7 @@ Update this file at the start and end of every stage.
 | Cycle detection | DFS + recStack (white/gray/black) | Called inside `FinishDag`; operates on `copyDag` snapshot |
 | Status transitions | `TransitionStatus(from, to)` CAS | Validates state-machine edge before lock; `SetStatus` kept for unconditional override only |
 | Error observability | `reportError` uses logrus fields | `dag_id` + `error` fields emitted on drop; `collectErrors` uses `DagConfig.ErrorDrainTimeout` |
+| `DagWorkerPool.Close` | `sync.Once` | `closeOnce.Do(close)` prevents double-close panic; `Submit` keeps blocking send for backpressure |
+| `fanIn` | `errgroup.WithContext` | No `SetLimit`: I/O-bound relay goroutines must run concurrently; cancellation via `egCtx.Done()` |
+| `DetectCycle` / `detectCycle` | Lock-split pattern | `detectCycle` (internal, no lock) called by `FinishDag`; `DetectCycle` (exported) acquires `RLock` |
+| `Progress()` | Two independent `atomic.LoadInt64` | Not an atomic pair; ratio may be slightly ahead between reads; acceptable for observability only |

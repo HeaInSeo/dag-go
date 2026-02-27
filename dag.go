@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/seoyhaein/utils"
+	"golang.org/x/sync/errgroup"
 )
 
 // TODO context 확인해야 함.
@@ -69,6 +70,7 @@ type DagWorkerPool struct {
 	workerLimit int
 	taskQueue   chan func()
 	wg          sync.WaitGroup
+	closeOnce   sync.Once // prevents double-close panic on taskQueue
 }
 
 type (
@@ -361,9 +363,10 @@ func (p *DagWorkerPool) Submit(task func()) {
 	p.taskQueue <- task
 }
 
-// Close 워커 풀을 종료
+// Close 워커 풀을 종료.
+// sync.Once 를 통해 taskQueue 를 한 번만 닫으므로 이중 호출 시 패닉이 발생하지 않는다.
 func (p *DagWorkerPool) Close() {
-	close(p.taskQueue)
+	p.closeOnce.Do(func() { close(p.taskQueue) })
 	p.wg.Wait()
 }
 
@@ -518,7 +521,13 @@ func (dag *Dag) getSafeVertex(parentID, childID string) *SafeChannel[runningStat
 	return nil
 }
 
-// Progress returns the progress of the DAG execution.
+// Progress returns the DAG execution completion ratio in [0.0, 1.0].
+//
+// NOTE: nodeCount and completedCount are read in two separate atomic operations;
+// they do not form an atomic pair.  completedCount may be incremented between the
+// two reads, making the returned ratio momentarily slightly ahead of reality.
+// This is acceptable for progress-bar or observability purposes, but must NOT
+// be used for correctness decisions (e.g. deciding whether all nodes finished).
 func (dag *Dag) Progress() float64 {
 	nodeCount := atomic.LoadInt64(&dag.nodeCount)
 	if nodeCount == 0 {
@@ -820,8 +829,9 @@ func (dag *Dag) FinishDag() error {
 		}
 	}
 
-	// 사이클 검사
-	if DetectCycle(dag) {
+	// 사이클 검사: FinishDag 는 이미 dag.mu.Lock() 을 보유하고 있으므로
+	// RLock 을 추가로 획득하는 DetectCycle 대신 내부 함수 detectCycle 을 직접 호출.
+	if detectCycle(dag) {
 		return logErr(fmt.Errorf("FinishDag: %w", ErrCycleDetected))
 	}
 
@@ -947,9 +957,10 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 	}
 	defer cancel()
 
-	// merge 의 결과를 받을 채널을 생성한다.
+	// mergeResult is a one-shot buffered channel: the goroutine writes exactly
+	// once and then exits, so no close is ever needed.  The buffer of 1 prevents
+	// the goroutine from blocking if Wait returns early (e.g. on ctx.Done).
 	mergeResult := make(chan bool, 1)
-	// 고루틴에서 merge 함수를 실행하고, 그 결과를 mergeResult 채널에 보낸다.
 	go func() {
 		mergeResult <- dag.merge(waitCtx)
 	}()
@@ -1007,14 +1018,16 @@ func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool {
 	return false
 }
 
-// DetectCycle checks if the DAG contains a cycle.
-func DetectCycle(dag *Dag) bool {
+// detectCycle checks if the DAG contains a cycle without acquiring a lock.
+// The caller must guarantee that dag.nodes is not mutated during this call
+// (e.g. by holding dag.mu in any mode).  FinishDag calls this directly because
+// it already holds dag.mu.Lock(); the exported DetectCycle acquires RLock first.
+func detectCycle(dag *Dag) bool {
 	// copyDag 는 최소 정보만 복사하므로, 사이클 검사에 적합
 	newNodes, _ := copyDag(dag)
 	visited := make(map[string]bool)
 	recStack := make(map[string]bool)
 
-	// 새로 복사된 노드들을 대상으로 DFS 를 수행
 	for _, node := range newNodes {
 		if !visited[node.ID] {
 			if detectCycleDFS(node, visited, recStack) {
@@ -1023,6 +1036,17 @@ func DetectCycle(dag *Dag) bool {
 		}
 	}
 	return false
+}
+
+// DetectCycle checks if the DAG contains a directed cycle.  It is safe to call
+// concurrently: it acquires a read lock before inspecting the graph.
+//
+// Internal callers that already hold dag.mu (e.g. FinishDag) must call
+// detectCycle directly to avoid a re-entrant lock attempt.
+func DetectCycle(dag *Dag) bool {
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+	return detectCycle(dag)
 }
 
 // connectRunner connects a runner function to a node.
@@ -1119,33 +1143,28 @@ func (dag *Dag) merge(ctx context.Context) bool {
 	return fanIn(ctx, dag.nodeResult, dag.NodesResult)
 }
 
-// fanIn merges multiple channels into one.
+// fanIn merges multiple channels into one using errgroup for structured cancellation.
+//
+// No concurrency limit is applied: the relay goroutines are I/O-bound (blocked
+// on channel reads) and must all run concurrently.  Adding errgroup.SetLimit
+// would serialize completions and increase tail latency without bounding CPU.
 func fanIn(ctx context.Context, channels []*SafeChannel[*printStatus], merged *SafeChannel[*printStatus]) bool {
-	var wg sync.WaitGroup
-	var canceled int32 // 0: 정상, 1: ctx.Done 발생
+	eg, egCtx := errgroup.WithContext(ctx)
 
-	// 각 SafeChannel 의 내부 채널에서 값을 읽어와 merged SafeChannel 에 블로킹 전송
 	for _, sc := range channels {
-		wg.Add(1)
-		go func(sc *SafeChannel[*printStatus]) {
-			defer wg.Done()
-			// 내부 채널을 순회
+		eg.Go(func() error {
 			for val := range sc.GetChannel() {
 				select {
-				case <-ctx.Done():
-					atomic.StoreInt32(&canceled, 1)
-					return
+				case <-egCtx.Done():
+					return egCtx.Err()
 				case merged.GetChannel() <- val:
-					// 값 전송 성공하면 계속 진행
 				}
 			}
-		}(sc)
+			return nil
+		})
 	}
 
-	wg.Wait()
-
-	// cancellation 플래그가 설정되어 있으면 false, 아니면 true 리턴
-	return atomic.LoadInt32(&canceled) == 0
+	return eg.Wait() == nil
 }
 
 // min returns the minimum of two integers.
