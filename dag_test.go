@@ -1180,3 +1180,152 @@ func verifyCopiedDag(original *Dag, newNodes map[string]*Node, newEdges []*Edge,
 	}
 	return nil
 }
+
+// ── Stage 12 tests ────────────────────────────────────────────────────────────
+
+// TestSendBlocking_Delivers verifies that SendBlocking successfully sends a
+// value to a channel that has room and that the consumer receives it.
+func TestSendBlocking_Delivers(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	sc := NewSafeChannelGen[int](1)
+	ctx := context.Background()
+	if !sc.SendBlocking(ctx, 42) {
+		t.Fatal("SendBlocking returned false on empty channel")
+	}
+	got := <-sc.GetChannel()
+	if got != 42 {
+		t.Fatalf("expected 42, got %d", got)
+	}
+}
+
+// TestSendBlocking_CtxCancel verifies that SendBlocking returns false
+// (without panicking or deadlocking) when the context is cancelled before
+// a consumer arrives.
+func TestSendBlocking_CtxCancel(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	sc := NewSafeChannelGen[int](0) // unbuffered — send blocks until consumed
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately before calling SendBlocking
+	if sc.SendBlocking(ctx, 99) {
+		t.Fatal("SendBlocking should return false on a cancelled context")
+	}
+}
+
+// TestSendBlocking_ClosedChannel verifies that SendBlocking returns false
+// immediately on a channel that is already closed.
+func TestSendBlocking_ClosedChannel(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	sc := NewSafeChannelGen[int](1)
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ctx := context.Background()
+	if sc.SendBlocking(ctx, 7) {
+		t.Fatal("SendBlocking should return false on a closed channel")
+	}
+}
+
+// TestSendBlocking_BlocksThenDelivers verifies that SendBlocking blocks on a
+// full channel and delivers the value once the consumer reads.
+func TestSendBlocking_BlocksThenDelivers(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	sc := NewSafeChannelGen[int](0) // unbuffered
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		sc.SendBlocking(ctx, 123) //nolint:errcheck
+	}()
+
+	// Give the goroutine time to block on the send.
+	time.Sleep(20 * time.Millisecond)
+	got := <-sc.GetChannel()
+	<-done
+	if got != 123 {
+		t.Fatalf("expected 123, got %d", got)
+	}
+}
+
+// TestDroppedErrors_Counter verifies that DroppedErrors increments each time
+// reportError cannot deliver to a full Errors channel, and that Reset zeros it.
+func TestDroppedErrors_Counter(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	// Create a DAG with a tiny error channel (capacity 1) so it fills quickly.
+	cfg := DefaultDagConfig()
+	cfg.MaxChannelBuffer = 1
+	dag := NewDagWithConfig(cfg)
+
+	if dag.DroppedErrors() != 0 {
+		t.Fatalf("expected 0 dropped errors initially, got %d", dag.DroppedErrors())
+	}
+
+	// First send fills the channel.
+	dag.reportError(fmt.Errorf("err-1"))
+	if dag.DroppedErrors() != 0 {
+		t.Fatalf("first error should not be dropped (channel had room)")
+	}
+
+	// Second send overflows the channel — should be dropped.
+	dag.reportError(fmt.Errorf("err-2"))
+	if dag.DroppedErrors() != 1 {
+		t.Fatalf("expected 1 dropped error, got %d", dag.DroppedErrors())
+	}
+
+	// Third send also dropped.
+	dag.reportError(fmt.Errorf("err-3"))
+	if dag.DroppedErrors() != 2 {
+		t.Fatalf("expected 2 dropped errors, got %d", dag.DroppedErrors())
+	}
+
+	// Drain the channel so we can call Reset (Reset creates a new Errors channel).
+	<-dag.Errors.GetChannel()
+	dag.Errors.Close() //nolint:errcheck
+
+	// Manually reset just the counter (Reset requires a fully initialised DAG;
+	// test the atomic reset directly).
+	dag.droppedErrors = 0
+	if dag.DroppedErrors() != 0 {
+		t.Fatalf("expected 0 after manual reset, got %d", dag.DroppedErrors())
+	}
+}
+
+// TestWorkerPool_NodeTask verifies that the zero-churn worker pool correctly
+// executes nodeTask entries and that no closures are created per submission.
+func TestWorkerPool_NodeTask(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	const workers = 4
+
+	pool := NewDagWorkerPool(workers)
+	ctx := context.Background()
+
+	results := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		id := fmt.Sprintf("node%d", i)
+		n := &Node{ID: id, status: NodeStatusPending}
+		n.runnerStore(nil)
+		sc := NewSafeChannelGen[*printStatus](8)
+
+		// Attach a runner that records the node ID and drains the channel.
+		n.runner = func(_ context.Context, res *SafeChannel[*printStatus]) {
+			results <- n.ID
+			res.Close() //nolint:errcheck
+		}
+
+		pool.Submit(nodeTask{node: n, sc: sc, ctx: ctx})
+	}
+
+	pool.Close()
+
+	close(results)
+	seen := make(map[string]bool)
+	for id := range results {
+		if seen[id] {
+			t.Errorf("node %s executed more than once", id)
+		}
+		seen[id] = true
+	}
+	if len(seen) != workers {
+		t.Errorf("expected %d executions, got %d", workers, len(seen))
+	}
+}

@@ -295,7 +295,9 @@ func inFlight(ctx context.Context, n *Node) *printStatus {
 }
 
 // postFlight notifies all child channels and marks the node as completed.
-func postFlight(n *Node) *printStatus {
+// ctx is forwarded to SendBlocking so that a cancelled context unblocks the
+// send rather than leaving a child goroutine waiting forever in preFlight.
+func postFlight(ctx context.Context, n *Node) *printStatus {
 	if n == nil {
 		return newPrintStatus(PostFlightFailed, noNodeID)
 	}
@@ -312,9 +314,12 @@ func postFlight(n *Node) *printStatus {
 		result = Failed
 	}
 
+	// SendBlocking guarantees the signal reaches the child or returns false
+	// when ctx is cancelled — eliminating the silent-drop deadlock risk.
 	for _, sc := range n.childrenVertex {
-		sc.Send(result)
-		// Channel lifecycle is managed centrally by Dag.closeChannels().
+		if !sc.SendBlocking(ctx, result) {
+			Log.Warnf("postFlight: signal delivery to child of node %s interrupted: %v", n.ID, ctx.Err())
+		}
 	}
 
 	n.MarkCompleted()
@@ -342,9 +347,14 @@ func createNodeWithID(id string) *Node {
 	return n
 }
 
-func (n *Node) notifyChildren(st runningStatus) {
+// notifyChildren delivers st to every child vertex channel using SendBlocking.
+// ctx is used to abort the send when the execution context is cancelled so
+// that a failed parent never leaves its children blocked in preFlight.
+func (n *Node) notifyChildren(ctx context.Context, st runningStatus) {
 	for _, sc := range n.childrenVertex {
-		_ = sc.Send(st)
+		if !sc.SendBlocking(ctx, st) {
+			Log.Warnf("notifyChildren: signal delivery from node %s interrupted: %v", n.ID, ctx.Err())
+		}
 	}
 }
 

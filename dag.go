@@ -93,11 +93,21 @@ type DagConfig struct {
 // Use the provided With* constructors to build option values.
 type DagOption func(*Dag)
 
+// nodeTask bundles the execution arguments for a single node run.
+// Passing a concrete struct to the worker queue eliminates the closure
+// allocation that the previous func() approach incurred per submission —
+// removing per-node heap pressure in large DAG executions.
+type nodeTask struct {
+	node *Node
+	sc   *SafeChannel[*printStatus]
+	ctx  context.Context //nolint:containedctx // transient task descriptor; ctx is consumed immediately by the worker
+}
+
 // DagWorkerPool manages a bounded pool of goroutines for concurrent node execution.
 // Tasks are submitted via Submit; Close drains the queue and waits for all workers.
 type DagWorkerPool struct {
 	workerLimit int
-	taskQueue   chan func()
+	taskQueue   chan nodeTask
 	wg          sync.WaitGroup
 	closeOnce   sync.Once // prevents double-close panic on taskQueue
 }
@@ -169,6 +179,7 @@ type Dag struct {
 	workerPool     *DagWorkerPool
 	nodeCount      int64        // total user-defined node count (atomic)
 	completedCount int64        // nodes that called MarkCompleted (atomic)
+	droppedErrors  int64        // errors dropped by reportError (atomic)
 	mu             sync.RWMutex // guards nodes map, ContainerCmd, runnerResolver
 }
 
@@ -408,20 +419,26 @@ func WithWorkerPool(size int) DagOption {
 
 // ==================== DagWorkerPool 메서드 ====================
 
-// NewDagWorkerPool 새로운 워커 풀을 생성
+// NewDagWorkerPool creates a new worker pool with the given number of goroutines.
+// The internal task queue is buffered to twice the worker count so that
+// callers are not serialised behind goroutine startup latency.
 func NewDagWorkerPool(limit int) *DagWorkerPool {
 	pool := &DagWorkerPool{
 		workerLimit: limit,
-		taskQueue:   make(chan func(), limit*2), // 버퍼 크기는 워커 수의 2배
+		taskQueue:   make(chan nodeTask, limit*2),
 	}
 
-	// 워커 고루틴 시작
 	for i := 0; i < limit; i++ { //nolint:intrange
 		pool.wg.Add(1)
 		go func() {
 			defer pool.wg.Done()
 			for task := range pool.taskQueue {
-				task()
+				// Skip execution if the caller's context is already done.
+				select {
+				case <-task.ctx.Done():
+				default:
+					task.node.runner(task.ctx, task.sc)
+				}
 			}
 		}()
 	}
@@ -429,8 +446,8 @@ func NewDagWorkerPool(limit int) *DagWorkerPool {
 	return pool
 }
 
-// Submit 작업을 워커 풀에 보냄
-func (p *DagWorkerPool) Submit(task func()) {
+// Submit enqueues a nodeTask for execution by the worker pool.
+func (p *DagWorkerPool) Submit(task nodeTask) {
 	p.taskQueue <- task
 }
 
@@ -472,13 +489,16 @@ func (dag *Dag) StartDag() (*Dag, error) {
 }
 
 // reportError delivers err to the error channel in a non-blocking fashion.
-// When the channel is full or already closed the error is logged with
-// structured fields rather than silently discarded.
+// When the channel is full or closed, the error is not silently discarded:
+// the droppedErrors counter is incremented (observable via DroppedErrors) and
+// a structured log entry is emitted so that log-aggregation pipelines can alert
+// on the event.  The cumulative drop count is included in the log field
+// "dropped_total" to make SLO alerting straightforward.
 func (dag *Dag) reportError(err error) {
 	if !dag.Errors.Send(err) {
-		// Channel is closed or full: surface as a structured log entry so the
-		// event is observable in log aggregation pipelines (Loki, CloudWatch…).
+		n := atomic.AddInt64(&dag.droppedErrors, 1)
 		Log.WithField("dag_id", dag.ID).
+			WithField("dropped_total", n).
 			WithError(err).
 			Warn("error channel full or closed; dropping error")
 	}
@@ -611,6 +631,14 @@ func (dag *Dag) Progress() float64 {
 	}
 	completedCount := atomic.LoadInt64(&dag.completedCount)
 	return float64(completedCount) / float64(nodeCount)
+}
+
+// DroppedErrors returns the number of errors that reportError could not deliver
+// to the Errors channel (channel full or closed) since the DAG was created or
+// last Reset.  A non-zero value indicates that DagConfig.MaxChannelBuffer is
+// too small or that the Errors channel consumer is not draining fast enough.
+func (dag *Dag) DroppedErrors() int64 {
+	return atomic.LoadInt64(&dag.droppedErrors)
 }
 
 // CreateNode creates a pointer to a new node with thread safety.
@@ -937,8 +965,9 @@ func (dag *Dag) Reset() {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
 
-	// Reset the completed-node counter to zero.
+	// Reset per-run counters to zero.
 	atomic.StoreInt64(&dag.completedCount, 0)
+	atomic.StoreInt64(&dag.droppedErrors, 0)
 
 	// Reset every node to Pending and clear its per-execution state.
 	// childrenVertex / parentVertex are cleared here and rebuilt from dag.Edges
@@ -1059,21 +1088,14 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 	safeChs := make([]*SafeChannel[*printStatus], 0, n)
 
 	for _, v := range dag.nodes {
-		nd := v // 캡처 문제 방지
-		// node 에서 내부적으로 처리할때 그 결과를 받는 채널.
+		// Per-node result channel: collects the three phase statuses
+		// (preFlight / inFlight / postFlight) that fanIn forwards to NodesResult.
 		sc := NewSafeChannelGen[*printStatus](dag.Config.MinChannelBuffer)
 		safeChs = append(safeChs, sc)
 
-		// 워커 풀에 작업 제출
-		dag.workerPool.Submit(func() {
-			select {
-			case <-ctx.Done():
-				// sc.Close()
-				return
-			default:
-				nd.runner(ctx, sc)
-			}
-		})
+		// Submit a zero-allocation nodeTask instead of a closure so the worker
+		// goroutine calls node.runner directly without a heap-allocated func().
+		dag.workerPool.Submit(nodeTask{node: v, sc: sc, ctx: ctx})
 	}
 
 	if dag.nodeResult != nil {
@@ -1264,19 +1286,23 @@ func DetectCycle(dag *Dag) bool {
 //nolint:gocognit // three-phase flight state machine with CAS guards; splitting would obscure the node lifecycle
 func connectRunner(n *Node) {
 	n.runner = func(ctx context.Context, result *SafeChannel[*printStatus]) {
-		// copyStatus acquires a new printStatus from the pool and copies the
-		// value fields of ps into it.  rStatus (int) and nodeID (string) are
-		// value types, so the copy is fully independent of the original.
-		copyStatus := func(ps *printStatus) *printStatus {
-			return newPrintStatus(ps.rStatus, ps.nodeID)
+		// sendResult delivers a copy of ps to the per-node result channel.
+		// SendBlocking ensures the monitoring event is never silently dropped:
+		// if the result buffer is momentarily full the send waits for a consumer.
+		// If ctx is cancelled the pool-acquired copy is returned to prevent leak.
+		sendResult := func(ps *printStatus) {
+			copied := newPrintStatus(ps.rStatus, ps.nodeID)
+			if !result.SendBlocking(ctx, copied) {
+				releasePrintStatus(copied)
+			}
 		}
 
 		// CheckParentsStatus internally calls TransitionStatus(Pending, Skipped)
 		// when a parent has failed, so no additional SetStatus call is needed here.
 		if !n.CheckParentsStatus() {
 			ps := newPrintStatus(PostFlightFailed, n.ID)
-			result.Send(copyStatus(ps))
-			n.notifyChildren(Failed)
+			sendResult(ps)
+			n.notifyChildren(ctx, Failed)
 			releasePrintStatus(ps)
 			return
 		}
@@ -1289,12 +1315,12 @@ func connectRunner(n *Node) {
 
 		// preFlight phase
 		ps := preFlight(ctx, n)
-		result.Send(copyStatus(ps))
+		sendResult(ps)
 		if ps.rStatus == PreflightFailed {
 			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
 				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
 			}
-			n.notifyChildren(Failed)
+			n.notifyChildren(ctx, Failed)
 			releasePrintStatus(ps)
 			return
 		}
@@ -1302,20 +1328,20 @@ func connectRunner(n *Node) {
 
 		// inFlight phase
 		ps = inFlight(ctx, n)
-		result.Send(copyStatus(ps))
+		sendResult(ps)
 		if ps.rStatus == InFlightFailed {
 			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
 				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
 			}
-			n.notifyChildren(Failed)
+			n.notifyChildren(ctx, Failed)
 			releasePrintStatus(ps)
 			return
 		}
 		releasePrintStatus(ps)
 
-		// postFlight phase
-		ps = postFlight(n)
-		result.Send(copyStatus(ps))
+		// postFlight phase — ctx forwarded so SendBlocking can abort on cancel.
+		ps = postFlight(ctx, n)
+		sendResult(ps)
 		if ps.rStatus == PostFlightFailed {
 			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
 				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())

@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 11 — Data Plane Performance Optimization (completed)
+## Current Status: Stage 12 — Execution Engine Reliability & Zero-churn Worker Pool (completed)
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -152,6 +152,55 @@ Update this file at the start and end of every stage.
 - `go test -race ./...` — **0 data races, all tests pass**.
 - `golangci-lint run ./...` — **0 issues**.
 
+### Stage 12 — Execution Engine Reliability & Zero-churn Worker Pool (completed)
+
+#### Task 1 — SafeChannel.SendBlocking: 신호 전파 신뢰성 강화
+- **`safechannel.go` (`SendBlocking`)**: New `SendBlocking(ctx context.Context, value T) bool` method
+  added.  Holds `sc.mu.RLock()` for the duration of the blocking select so that a concurrent
+  `Close()` cannot race with the send.  Returns false immediately if the channel is already closed
+  or ctx is done; otherwise blocks until a consumer reads the value.
+- **`node.go` (`postFlight`)**: Signature changed from `postFlight(n *Node)` to
+  `postFlight(ctx context.Context, n *Node)`.  All `childrenVertex` sends now use
+  `sc.SendBlocking(ctx, result)` — eliminating the silent-drop deadlock risk.
+- **`node.go` (`notifyChildren`)**: Signature changed to accept `ctx context.Context`.  Uses
+  `sc.SendBlocking(ctx, st)` so a cancelled context aborts the delivery rather than leaving
+  a child blocked in preFlight forever.
+- **`dag.go` (`connectRunner`)**: ctx forwarded to `postFlight(ctx, n)` and
+  `n.notifyChildren(ctx, ...)`.  Introduced `sendResult` helper closure that calls
+  `result.SendBlocking(ctx, copied)` and returns the pool-acquired copy if delivery fails —
+  closing the `printStatus` pool lifecycle and preventing memory leaks on context cancellation.
+
+#### Task 2 — Zero-churn Worker Pool: 클로저 할당 제거
+- **`dag.go` (`nodeTask`)**: New concrete struct `nodeTask{node *Node, sc *SafeChannel[*printStatus], ctx context.Context}`.
+  Replaces the per-submission `func()` closure; the worker goroutine calls `task.node.runner(task.ctx, task.sc)` directly.
+- **`dag.go` (`DagWorkerPool.taskQueue`)**: Type changed from `chan func()` to `chan nodeTask`.
+- **`dag.go` (`NewDagWorkerPool`)**: Workers iterate `chan nodeTask`; each task selects on
+  `task.ctx.Done()` before calling the runner — preserving the context-cancellation exit path
+  without a heap-allocated closure.
+- **`dag.go` (`Submit`)**: Now accepts `nodeTask` directly.
+- **`dag.go` (`GetReady`)**: Removed the `nd := v` capture variable and the closure;
+  submits `nodeTask{node: v, sc: sc, ctx: ctx}` instead.
+
+#### Task 3 — Error Reporting Reliability: 에러 유실 추적
+- **`dag.go` (`Dag.droppedErrors`)**: New `int64` atomic field tracking errors that could not
+  be delivered to the `Errors` channel (channel full or closed).
+- **`dag.go` (`DroppedErrors() int64`)**: New exported method; returns the current drop count.
+  Non-zero value signals that `DagConfig.MaxChannelBuffer` is too small or consumers are slow.
+- **`dag.go` (`reportError`)**: Now calls `atomic.AddInt64(&dag.droppedErrors, 1)` on drop and
+  emits `"dropped_total"` logrus field — enabling SLO alerting in log-aggregation pipelines.
+- **`dag.go` (`Reset`)**: `droppedErrors` zeroed via `atomic.StoreInt64` alongside `completedCount`.
+
+#### Tests
+- `TestSendBlocking_Delivers` — successful send on an empty channel.
+- `TestSendBlocking_CtxCancel` — returns false on pre-cancelled context (no deadlock).
+- `TestSendBlocking_ClosedChannel` — returns false immediately on closed channel.
+- `TestSendBlocking_BlocksThenDelivers` — blocks on unbuffered channel, delivers once consumer reads.
+- `TestDroppedErrors_Counter` — increments on overflow, zero after reset.
+- `TestWorkerPool_NodeTask` — all nodes executed exactly once via concrete nodeTask.
+
+- `go test -race ./...` — **0 data races, all tests pass**.
+- `golangci-lint run ./...` — **0 issues**.
+
 ---
 
 ## Pending Items
@@ -198,3 +247,7 @@ Update this file at the start and end of every stage.
 | `printStatus` pool | `statusPool` (`sync.Pool`) | `newPrintStatus` → `copyStatus` (connectRunner) → `result.Send` → `releasePrintStatus` (Wait); full lifecycle closed in Stage 11 |
 | `dfsStatePool` | `sync.Pool` of `dfsState` | Provides zero-alloc DFS traversal for `detectCycle`; `clear()` resets maps per call |
 | `DagConfig.ExpectedNodeCount` | Capacity hint | Pre-allocates `nodes` map and `Edges` slice in `NewDagWithConfig`; zero = runtime default |
+| `SafeChannel.SendBlocking` | Blocking send with ctx | Holds `RLock` during select; guarantees delivery or ctx-abort — never silently drops edge signals |
+| `postFlight` / `notifyChildren` | ctx-aware signal delivery | Use `SendBlocking` so a cancelled context unblocks the send; child nodes never wait forever on a failed parent |
+| `nodeTask` / `DagWorkerPool` | Zero-alloc worker queue | `chan nodeTask` replaces `chan func()`; eliminates one closure allocation per node per DAG run |
+| `Dag.droppedErrors` | Atomic drop counter | Incremented by `reportError` on overflow; exposed via `DroppedErrors()`; zeroed by `Reset()` |
