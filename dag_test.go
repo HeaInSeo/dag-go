@@ -557,7 +557,102 @@ func TestCopyDagIndependence(t *testing.T) {
 	}
 }
 
-// TODO detectCycleDFS, DetectCycle 테스트 필요.
+// TestDetectCycle_SimpleCycle verifies that FinishDag returns ErrCycleDetected
+// for a direct two-node cycle: start → A → B → A.
+func TestDetectCycle_SimpleCycle(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	dag, _ := InitDag()
+
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge start->A: %v", err)
+	}
+	if err := dag.AddEdge("A", "B"); err != nil {
+		t.Fatalf("AddEdge A->B: %v", err)
+	}
+	// Back-edge B→A closes the cycle; AddEdge allows it (only rejects from==to).
+	if err := dag.AddEdge("B", "A"); err != nil {
+		t.Fatalf("AddEdge B->A: %v", err)
+	}
+
+	err := dag.FinishDag()
+	if err == nil {
+		t.Fatal("expected ErrCycleDetected, got nil")
+	}
+	if !errors.Is(err, ErrCycleDetected) {
+		t.Errorf("expected ErrCycleDetected, got: %v", err)
+	}
+}
+
+// TestDetectCycle_ComplexCycle verifies that FinishDag returns ErrCycleDetected
+// for a three-node cycle: start → A → B → C → A.
+func TestDetectCycle_ComplexCycle(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	dag, _ := InitDag()
+
+	for _, pair := range []struct{ from, to string }{
+		{StartNode, "A"}, {"A", "B"}, {"B", "C"}, {"C", "A"},
+	} {
+		if err := dag.AddEdge(pair.from, pair.to); err != nil {
+			t.Fatalf("AddEdge %s->%s: %v", pair.from, pair.to, err)
+		}
+	}
+
+	err := dag.FinishDag()
+	if err == nil {
+		t.Fatal("expected ErrCycleDetected, got nil")
+	}
+	if !errors.Is(err, ErrCycleDetected) {
+		t.Errorf("expected ErrCycleDetected, got: %v", err)
+	}
+}
+
+// TestDetectCycle_SelfLoop verifies that DetectCycle returns true for a node
+// that lists itself as a child.  AddEdge rejects from==to, so the graph is
+// constructed directly to reach the algorithm under test.
+func TestDetectCycle_SelfLoop(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	dag := NewDag()
+	nodeA := &Node{ID: "A"}
+	nodeA.children = []*Node{nodeA} // A → A
+	dag.nodes = map[string]*Node{"A": nodeA}
+
+	if !DetectCycle(dag) {
+		t.Error("expected DetectCycle to return true for self-loop, got false")
+	}
+}
+
+// TestDetectCycle_NoCycle verifies that a valid diamond-shaped DAG is not flagged
+// as cyclic by either FinishDag or DetectCycle.
+//
+// Graph: start → A → {B1, B2} → C → {D1, D2} → E
+func TestDetectCycle_NoCycle(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	dag, _ := InitDag()
+
+	for _, pair := range []struct{ from, to string }{
+		{StartNode, "A"},
+		{"A", "B1"}, {"A", "B2"},
+		{"B1", "C"}, {"B2", "C"},
+		{"C", "D1"}, {"C", "D2"},
+		{"D1", "E"}, {"D2", "E"},
+	} {
+		if err := dag.AddEdge(pair.from, pair.to); err != nil {
+			t.Fatalf("AddEdge %s->%s: %v", pair.from, pair.to, err)
+		}
+	}
+
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag returned unexpected error for valid DAG: %v", err)
+	}
+	// DetectCycle should also confirm no cycle after FinishDag.
+	if DetectCycle(dag) {
+		t.Error("expected DetectCycle to return false for valid DAG, got true")
+	}
+}
 
 func TestDetectCycle(t *testing.T) {
 	defer goleak.VerifyNone(t)

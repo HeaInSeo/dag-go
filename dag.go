@@ -808,7 +808,7 @@ func (dag *Dag) FinishDag() error {
 
 	// 사이클 검사
 	if DetectCycle(dag) {
-		return logErr(fmt.Errorf("cycle detected in DAG"))
+		return logErr(fmt.Errorf("FinishDag: %w", ErrCycleDetected))
 	}
 
 	// 검증 완료 플래그 설정
