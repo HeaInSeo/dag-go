@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 7 — Performance Optimization & Internal Concurrency Refinement
+## Current Status: Stage 9 — Public API Hardening (completed)
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -116,10 +116,12 @@ Update this file at the start and end of every stage.
 - [ ] Add `Dag.ErrCount()` helper to expose current Errors channel depth without draining.
 - [ ] Consider `ErrorPolicy` enum: `FailFast` (current) vs `ContinueOnError`.
 
-### Stage 9 — Public API Hardening (planned)
-- [ ] `CopyDag` does not copy `Config` or `workerPool`; document this or fix.
-- [ ] Godoc pass: all exported symbols must have comments (revive:exported rule already enforced).
-- [ ] Evaluate adding `Dag.Reset()` to allow DAG reuse after `Wait` completes.
+### Stage 9 — Public API Hardening (completed)
+- [x] `CopyDag` fixed: now copies `Config` (all DagConfig fields) and allocates a new `Errors` channel so the copy is fully independent from the original.
+- [x] Godoc pass: all exported types, fields, and functions in `dag.go` now have comprehensive godoc comments (construction order, threading guarantees, usage caveats).
+- [x] `Dag.Reset()` implemented — resets all nodes to Pending, recreates edge channels, rebuilds vertex wiring, and recreates the aggregation channels; allows full DAG reuse after `Wait` without graph rebuilding.
+- [x] `TestDagReset`: two-run integration test verifying `Progress()` → 1.0 first run, `Progress()` → 0.0 after Reset, all nodes Pending, `Progress()` → 1.0 second run.
+- `workerPool` intentionally NOT copied by `CopyDag` (documented in godoc); each copy must call its own `GetReady`.
 
 ### Stage 10 — Profiling & Advanced Optimisation (planned)
 - [ ] Profile `TestComplexDag` under race detector; identify hot paths.
@@ -142,3 +144,5 @@ Update this file at the start and end of every stage.
 | `fanIn` | `errgroup.WithContext` | No `SetLimit`: I/O-bound relay goroutines must run concurrently; cancellation via `egCtx.Done()` |
 | `DetectCycle` / `detectCycle` | Lock-split pattern | `detectCycle` (internal, no lock) called by `FinishDag`; `DetectCycle` (exported) acquires `RLock` |
 | `Progress()` | Two independent `atomic.LoadInt64` | Not an atomic pair; ratio may be slightly ahead between reads; acceptable for observability only |
+| `Dag.Reset()` | Channel recreation + node state wipe | Must be called only after `Wait` returns; rebuilds edge channels from `dag.Edges` slice so topology is preserved |
+| `CopyDag` | Structural copy | Copies `Config` and allocates new `NodesResult`/`Errors` channels; `workerPool`/`nodeResult`/`errLogs` intentionally not copied |

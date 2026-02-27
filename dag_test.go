@@ -1011,6 +1011,77 @@ func TestComplexDagProgress(t *testing.T) {
 	}
 }
 
+// TestDagReset verifies that a DAG can be executed a second time after Reset()
+// returns the same result as the first run.
+func TestDagReset(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	buildAndRun := func(dag *Dag) bool {
+		ctx := context.Background()
+		dag.ConnectRunner()
+		if !dag.GetReady(ctx) {
+			t.Fatal("GetReady failed")
+		}
+		if !dag.Start() {
+			t.Fatal("Start failed")
+		}
+		return dag.Wait(ctx)
+	}
+
+	// Build a diamond DAG: start → A → {B1, B2} → C.
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+
+	for _, pair := range []struct{ from, to string }{
+		{StartNode, "A"},
+		{"A", "B1"},
+		{"A", "B2"},
+		{"B1", "C"},
+		{"B2", "C"},
+	} {
+		if err := dag.AddEdge(pair.from, pair.to); err != nil {
+			t.Fatalf("AddEdge %s->%s: %v", pair.from, pair.to, err)
+		}
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	// ── First run ──
+	if ok := buildAndRun(dag); !ok {
+		t.Fatal("first Wait returned false")
+	}
+	if p := dag.Progress(); p != 1.0 {
+		t.Errorf("first run: expected progress 1.0, got %v", p)
+	}
+
+	// ── Reset ──
+	dag.Reset()
+
+	// Progress must be 0.0 immediately after Reset (counters cleared).
+	if p := dag.Progress(); p != 0.0 {
+		t.Errorf("after Reset: expected progress 0.0, got %v", p)
+	}
+
+	// All nodes must be back in Pending.
+	for id, n := range dag.nodes {
+		if got := n.GetStatus(); got != NodeStatusPending {
+			t.Errorf("after Reset: node %s expected Pending, got %v", id, got)
+		}
+	}
+
+	// ── Second run ──
+	if ok := buildAndRun(dag); !ok {
+		t.Fatal("second Wait after Reset returned false")
+	}
+	if p := dag.Progress(); p != 1.0 {
+		t.Errorf("second run: expected progress 1.0, got %v", p)
+	}
+}
+
 // generateDAG 는 numNodes 개의 노드를 생성하고,
 // i < j 인 경우 확률 edgeProb 로 부모-자식 간선을 추가하여 DAG 를 구성
 func generateDAG(numNodes int, edgeProb float64) *Dag {

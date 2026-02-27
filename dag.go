@@ -50,22 +50,44 @@ const noNodeID = "-1"
 // ==================== 타입 정의 ====================
 
 // DagConfig holds tunable parameters for a Dag instance.
+// Use DefaultDagConfig for production-ready defaults, or override individual
+// fields before passing to NewDagWithConfig.
 type DagConfig struct {
+	// MinChannelBuffer is the buffer size for inter-node edge channels.  Larger
+	// values reduce the chance of a parent blocking while writing to a slow child.
+	// Default: 5.
 	MinChannelBuffer int
+
+	// MaxChannelBuffer is the buffer capacity for the NodesResult and Errors
+	// aggregation channels.  Set this higher than the total number of nodes to
+	// prevent back-pressure stalls.  Default: 100.
 	MaxChannelBuffer int
-	StatusBuffer     int
-	WorkerPoolSize   int
-	DefaultTimeout   time.Duration
+
+	// StatusBuffer is reserved for future per-node status channel buffering.
+	// Default: 10.
+	StatusBuffer int
+
+	// WorkerPoolSize caps the number of goroutines that execute nodes concurrently.
+	// If the number of nodes is smaller than WorkerPoolSize, the pool is sized to
+	// the node count instead (min of the two).  Default: 50.
+	WorkerPoolSize int
+
+	// DefaultTimeout is the preFlight wait deadline applied to every node that
+	// does not set its own Node.Timeout.  Zero means no extra timeout is added
+	// beyond the caller's context deadline.  Default: 30 s.
+	DefaultTimeout time.Duration
 
 	// ErrorDrainTimeout is the maximum time collectErrors will wait to drain the
 	// Errors channel.  Defaults to 5 s when left at zero (see DefaultDagConfig).
 	ErrorDrainTimeout time.Duration
 }
 
-// DagOption DAG 옵션 함수 타입
+// DagOption is a functional-option type for NewDagWithOptions.
+// Use the provided With* constructors to build option values.
 type DagOption func(*Dag)
 
-// DagWorkerPool DAG 워커 풀을 구현
+// DagWorkerPool manages a bounded pool of goroutines for concurrent node execution.
+// Tasks are submitted via Submit; Close drains the queue and waits for all workers.
 type DagWorkerPool struct {
 	workerLimit int
 	taskQueue   chan func()
@@ -85,55 +107,83 @@ type (
 // createEdgeErrorType 0 if created, 1 if exists, 2 if error.
 type createEdgeErrorType int
 
-// Dag (Directed Acyclic Graph) is an acyclic graph, not a cyclic graph.
-// In other words, there is no cyclic cycle in the DAG algorithm, and it has only one direction.
+// Dag is a Directed Acyclic Graph execution engine.
+//
+// A Dag is created with InitDag (or NewDag / NewDagWithConfig), populated with
+// AddEdge calls, sealed with FinishDag, and then executed via the lifecycle:
+//
+//	ConnectRunner → GetReady → Start → Wait
+//
+// A completed DAG can be re-executed by calling Reset followed by the same
+// lifecycle.  Dag must always be handled as a pointer; value-copy is forbidden
+// because it embeds sync.RWMutex.
 type Dag struct {
-	ID    string
+	// ID is the unique identifier assigned at creation time (UUID v4).
+	ID string
+
+	// Edges is the ordered list of directed edges in the graph.
+	// Mutate only through AddEdge / AddEdgeIfNodesExist before FinishDag.
 	Edges []*Edge
 
 	nodes     map[string]*Node
-	StartNode *Node
-	EndNode   *Node
-	validated bool
+	StartNode *Node // synthetic entry node created by StartDag
+	EndNode   *Node // synthetic exit node created by FinishDag
 
+	validated bool // true after FinishDag succeeds
+
+	// NodesResult is the fan-in channel that collects printStatus events from
+	// every node during execution.  Wait reads from this channel.
 	NodesResult *SafeChannel[*printStatus]
-	nodeResult  []*SafeChannel[*printStatus]
+	nodeResult  []*SafeChannel[*printStatus] // per-node result channels
 
 	// errLogs collects structured errors for post-mortem inspection.
 	errLogs []*systemError
-	// Errors is the concurrency-safe error channel; use reportError to write and
-	// collectErrors (or Errors.GetChannel()) to read.
+
+	// Errors is the concurrency-safe error channel for runtime RunE failures.
+	// Use reportError to write and collectErrors (or Errors.GetChannel()) to read.
+	// The channel is recreated by Reset so it is valid for the next run.
 	Errors *SafeChannel[error]
 
-	// timeout
+	// Timeout is the DAG-level execution deadline applied when bTimeout is true.
+	// Set via WithTimeout or by assigning directly before GetReady.
 	Timeout  time.Duration
 	bTimeout bool
 
-	// TODO 확인할 것 -추가
-	// 전역 기본 러너(실행 시점 반영용)
+	// ContainerCmd is the global default Runnable applied to every node that
+	// has no per-node override and no resolver match.
+	// Set via SetContainerCmd to ensure thread-safe mutation.
 	ContainerCmd Runnable
 
-	// Resolver
-	runnerResolver RunnerResolver
+	runnerResolver RunnerResolver // optional dynamic runner selector
 
-	// 추가된 필드
-	Config         DagConfig
+	// Config holds the tunable parameters active for this DAG instance.
+	Config DagConfig
+
 	workerPool     *DagWorkerPool
-	nodeCount      int64        // 노드 수를 원자적으로 추적
-	completedCount int64        // 완료된 노드 수를 원자적으로 추적
-	mu             sync.RWMutex // 맵 접근을 보호하기 위한 뮤텍스
+	nodeCount      int64        // total user-defined node count (atomic)
+	completedCount int64        // nodes that called MarkCompleted (atomic)
+	mu             sync.RWMutex // guards nodes map, ContainerCmd, runnerResolver
 }
 
-// Edge is a channel. It has the same meaning as the connecting line connecting the parent and child nodes.
+// Edge represents a directed connection between two nodes.
+// The embedded safeVertex channel carries runningStatus signals from the parent
+// node to its child during execution.  Edges are created by AddEdge and reset
+// by Reset; callers should not manipulate the fields directly.
 type Edge struct {
 	parentID   string
 	childID    string
-	safeVertex *SafeChannel[runningStatus] // 안전한 채널 추가.
+	safeVertex *SafeChannel[runningStatus]
 }
 
 // ==================== DAG 기본 및 옵션 함수 ====================
 
-// DefaultDagConfig returns a DagConfig with production-ready defaults.
+// DefaultDagConfig returns a DagConfig populated with production-ready defaults:
+//   - MinChannelBuffer: 5
+//   - MaxChannelBuffer: 100
+//   - StatusBuffer:     10
+//   - WorkerPoolSize:   50
+//   - DefaultTimeout:   30 s
+//   - ErrorDrainTimeout: 5 s
 func DefaultDagConfig() DagConfig {
 	return DagConfig{
 		MinChannelBuffer:  5,
@@ -145,12 +195,15 @@ func DefaultDagConfig() DagConfig {
 	}
 }
 
-// NewDag creates a pointer to the Dag structure with default configuration.
+// NewDag returns a new Dag with default configuration (see DefaultDagConfig).
+// Call StartDag (or use InitDag) to add the synthetic start node before adding edges.
 func NewDag() *Dag {
 	return NewDagWithConfig(DefaultDagConfig())
 }
 
-// NewDagWithConfig creates a pointer to the Dag structure with custom configuration.
+// NewDagWithConfig returns a new Dag using the supplied DagConfig.
+// Prefer InitDag for the common case; use this constructor when you need to
+// customise buffer sizes, timeouts, or the worker pool size before adding nodes.
 func NewDagWithConfig(config DagConfig) *Dag {
 	return &Dag{
 		nodes:       make(map[string]*Node),
@@ -161,7 +214,9 @@ func NewDagWithConfig(config DagConfig) *Dag {
 	}
 }
 
-// NewDagWithOptions creates a pointer to the Dag structure with options.
+// NewDagWithOptions returns a new Dag with DefaultDagConfig, then applies each
+// DagOption in order.  Functional options (e.g. WithTimeout, WithWorkerPool)
+// are applied after default values, so later options can override earlier ones.
 func NewDagWithOptions(options ...DagOption) *Dag {
 	dag := NewDagWithConfig(DefaultDagConfig())
 
@@ -173,7 +228,9 @@ func NewDagWithOptions(options ...DagOption) *Dag {
 	return dag
 }
 
-// InitDag creates and initializes a new DAG.
+// InitDag creates a new DAG with default configuration and immediately calls
+// StartDag to create the synthetic start node.  It is the recommended entry
+// point for most users.
 func InitDag() (*Dag, error) {
 	dag := NewDag()
 	if dag == nil {
@@ -184,7 +241,9 @@ func InitDag() (*Dag, error) {
 
 // ==================== 전역 러너/리졸버 ====================
 
-// SetContainerCmd sets the container command for the DAG.
+// SetContainerCmd sets the global default Runnable for all nodes in this DAG.
+// It is safe to call concurrently.  Per-node overrides (SetNodeRunner) and the
+// RunnerResolver take priority over this value; see runner priority in the README.
 func (dag *Dag) SetContainerCmd(r Runnable) {
 	// dag.ContainerCmd = r
 
@@ -204,7 +263,10 @@ func (dag *Dag) SetContainerCmd(r Runnable) {
 	return v.(*runnerSlot).r
 } */
 
-// SetRunnerResolver  Dag 에 Resolver 보관
+// SetRunnerResolver installs a dynamic runner selector for this DAG.
+// The resolver is called at execution time for each node, after the per-node
+// atomic override is checked but before the global ContainerCmd fallback.
+// Pass nil to clear a previously installed resolver.  Thread-safe.
 func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
 	// dag.runnerResolver = rr
 
@@ -372,7 +434,12 @@ func (p *DagWorkerPool) Close() {
 
 // ==================== Dag 메서드 ====================
 
-// StartDag initializes the DAG with a start node.
+// StartDag creates the synthetic start node and its trigger channel.
+// It is called automatically by InitDag; call it directly only when building a
+// DAG with NewDag or NewDagWithConfig.
+//
+// Returns the receiver so calls can be chained, or an error if the start node
+// could not be created (e.g. the DAG is nil or the node was already created).
 func (dag *Dag) StartDag() (*Dag, error) {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
@@ -840,6 +907,82 @@ func (dag *Dag) FinishDag() error {
 	return nil
 }
 
+// Reset reinitialises a completed DAG so it can be executed again without
+// rebuilding the graph from scratch.
+//
+// Reset MUST be called only after Wait returns.  Calling it while the DAG is
+// still running leads to undefined behaviour because Reset replaces channels
+// that active goroutines may be reading from or writing to.
+//
+// After Reset, follow the standard execution lifecycle:
+//
+//	dag.Reset()
+//	dag.ConnectRunner()
+//	dag.GetReady(ctx)
+//	dag.Start()
+//	dag.Wait(ctx)
+//
+// The graph topology (nodes, edges, Config, ContainerCmd, runners) is preserved;
+// only execution state is reset.
+func (dag *Dag) Reset() {
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+
+	// Reset the completed-node counter to zero.
+	atomic.StoreInt64(&dag.completedCount, 0)
+
+	// Reset every node to Pending and clear its per-execution state.
+	// childrenVertex / parentVertex are cleared here and rebuilt from dag.Edges
+	// below so they point to the newly created SafeChannels.
+	for _, n := range dag.nodes {
+		n.mu.Lock()
+		n.status = NodeStatusPending
+		n.succeed = false
+		n.runner = nil
+		n.childrenVertex = nil
+		n.parentVertex = nil
+		n.mu.Unlock()
+	}
+
+	// Re-attach the start-node trigger channel.  This channel is not backed by
+	// an Edge entry; Start() writes to parentVertex[0] to fire the first node.
+	if dag.StartNode != nil {
+		dag.StartNode.mu.Lock()
+		dag.StartNode.parentVertex = []*SafeChannel[runningStatus]{
+			NewSafeChannelGen[runningStatus](dag.Config.MinChannelBuffer),
+		}
+		dag.StartNode.mu.Unlock()
+	}
+
+	// Recreate each edge's channel and rewire it into the owning nodes' vertex
+	// slices.  The lock order (dag.mu → n.mu) is consistent with the rest of
+	// the codebase and prevents deadlocks.
+	for _, edge := range dag.Edges {
+		edge.safeVertex = NewSafeChannelGen[runningStatus](dag.Config.MinChannelBuffer)
+		if parent := dag.nodes[edge.parentID]; parent != nil {
+			parent.mu.Lock()
+			parent.childrenVertex = append(parent.childrenVertex, edge.safeVertex)
+			parent.mu.Unlock()
+		}
+		if child := dag.nodes[edge.childID]; child != nil {
+			child.mu.Lock()
+			child.parentVertex = append(child.parentVertex, edge.safeVertex)
+			child.mu.Unlock()
+		}
+	}
+
+	// Recreate the aggregated result and error channels that Wait → closeChannels
+	// closed at the end of the previous run.
+	dag.NodesResult = NewSafeChannelGen[*printStatus](dag.Config.MaxChannelBuffer)
+	dag.Errors = NewSafeChannelGen[error](dag.Config.MaxChannelBuffer)
+
+	// Clear per-run state so GetReady and the worker pool are re-initialised
+	// fresh on the next call.
+	dag.nodeResult = nil
+	dag.workerPool = nil
+	dag.errLogs = nil
+}
+
 // visitReset resets the visited status of all nodes.
 //
 //nolint:unused // This function is intentionally left for future use.
@@ -860,7 +1003,13 @@ func (dag *Dag) visitReset() map[string]bool {
 	return visited
 }
 
-// ConnectRunner connects runner functions to all nodes.
+// ConnectRunner attaches a runner closure (the three-phase preFlight / inFlight /
+// postFlight state machine) to every node.
+//
+// Call ConnectRunner after FinishDag and before GetReady.  After Reset, call it
+// again so the closures reference the freshly created channels.
+//
+// Returns false if the DAG has no nodes.
 func (dag *Dag) ConnectRunner() bool {
 	dag.mu.RLock()
 	defer dag.mu.RUnlock()
@@ -875,7 +1024,14 @@ func (dag *Dag) ConnectRunner() bool {
 	return true
 }
 
-// GetReady prepares the DAG for execution with worker pool.
+// GetReady initialises the worker pool and submits a goroutine task for every
+// node.  The worker pool size is min(nodeCount, DagConfig.WorkerPoolSize).
+//
+// Call GetReady after ConnectRunner and before Start.  ctx is forwarded to each
+// node's runner function; cancel it to abort the entire execution.
+//
+// Returns false if the DAG has no nodes or GetReady has already been called
+// (i.e. nodeResult is already set).
 func (dag *Dag) GetReady(ctx context.Context) bool {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
@@ -918,7 +1074,12 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 	return true
 }
 
-// Start initiates the DAG execution.
+// Start fires the DAG by sending a trigger signal to the start node's input
+// channel.  All node goroutines are already waiting (submitted by GetReady);
+// this single send unblocks the start node and cascades through the graph.
+//
+// Call Start exactly once after GetReady.  Returns false if the trigger send
+// fails (e.g. channel full or closed, which should not happen in normal use).
 func (dag *Dag) Start() bool {
 	if len(dag.StartNode.parentVertex) != 1 {
 		return false
@@ -935,7 +1096,19 @@ func (dag *Dag) Start() bool {
 	return true
 }
 
-// Wait waits for the DAG execution to complete.
+// Wait blocks until the DAG finishes execution, ctx expires, or a fatal node
+// failure is detected on NodesResult.
+//
+// It returns true only when the end node emits a FlightEnd status — meaning
+// every node in the graph reached a terminal state (Succeeded or Skipped).
+// It returns false on any of:
+//   - context cancellation or timeout
+//   - NodesResult channel closed unexpectedly
+//   - end node reporting a PreflightFailed / InFlightFailed / PostFlightFailed
+//
+// Wait closes all channels (closeChannels) and shuts down the worker pool when
+// it returns, regardless of whether execution succeeded.  Do NOT use the DAG
+// after Wait returns without first calling Reset.
 //
 //nolint:gocognit // fan-in select loop must handle merge result, node status stream, and context cancellation simultaneously
 func (dag *Dag) Wait(ctx context.Context) bool {
@@ -1175,8 +1348,18 @@ func minInt(a, b int) int {
 	return b
 }
 
-// CopyDag creates a structural copy of the original DAG with a new ID.
-// The copy shares the same ContainerCmd and timeout settings but has independent channels.
+// CopyDag creates a structural copy of original with a new ID.
+//
+// The copy preserves the graph topology (nodes, edges, parent/child relationships)
+// and all DagConfig values.  It owns independent channels (NodesResult, Errors,
+// edge safeVertices) so executing the copy cannot affect the original.
+//
+// Items NOT copied: workerPool, nodeResult, errLogs, and runnerResolver.
+// The caller must wire runners and call the standard lifecycle on the copy:
+//
+//	ConnectRunner → GetReady → Start → Wait
+//
+// Returns nil if original is nil or newID is empty.
 func CopyDag(original *Dag, newID string) *Dag {
 	if original == nil {
 		return nil
@@ -1191,7 +1374,9 @@ func CopyDag(original *Dag, newID string) *Dag {
 		bTimeout:     original.bTimeout,
 		ContainerCmd: original.ContainerCmd,
 		validated:    original.validated,
+		Config:       original.Config, // copy all DagConfig fields
 		NodesResult:  NewSafeChannelGen[*printStatus](original.Config.MaxChannelBuffer),
+		Errors:       NewSafeChannelGen[error](original.Config.MaxChannelBuffer),
 	}
 
 	// 노드와 간선 복사
