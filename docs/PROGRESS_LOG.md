@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 5 — Node Status Atomicity (CAS Pattern)
+## Current Status: Stage 6 — README & Error Handling Hardening
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -38,7 +38,7 @@ Update this file at the start and end of every stage.
 - `go mod tidy`: removed unused `github.com/dlsniper/debugger` direct dependency.
 - Lint: 0 issues. All tests passing. Commit: `707bd29`.
 
-### Stage 4 — Cycle Detection Completion (current)
+### Stage 4 — Cycle Detection Completion
 - **`errors.go`**: Added `ErrCycleDetected` sentinel error (`errors.New`).
 - **`dag.go` (`FinishDag`)**: Cycle detection now returns `fmt.Errorf("FinishDag: %w", ErrCycleDetected)`,
   enabling callers to use `errors.Is(err, ErrCycleDetected)`.
@@ -49,7 +49,7 @@ Update this file at the start and end of every stage.
   - `TestDetectCycle_NoCycle`: diamond DAG — verifies FinishDag and DetectCycle both return clean.
 - All tests passing; lint 0 issues.
 
-### Stage 5 — Node Status Atomicity: CAS Pattern (current)
+### Stage 5 — Node Status Atomicity: CAS Pattern
 - **`node.go`**: Added `isValidTransition(from, to NodeStatus) bool` state-machine helper.
 - **`node.go`**: Added `TransitionStatus(from, to NodeStatus) bool` — mutex-protected CAS:
   - Validates the from→to edge against the state machine before acquiring the lock.
@@ -69,25 +69,39 @@ Update this file at the start and end of every stage.
 - `go test -race ./...` — **0 data races detected**.
 - `golangci-lint run ./...` — **0 issues**.
 
+### Stage 6 — README & Error Handling Hardening (current)
+- **`README.md`**: Complete rewrite — Introduction, Key Features table, Quick Start code example,
+  DAG Lifecycle diagram, Node State Machine (Mermaid), Configuration reference,
+  Per-Node Runner Override section, Error Handling section, Development guide.
+  Travis CI badge removed (`.travis.yml` was deleted in Stage 2).
+  pkg.go.dev link promoted as the canonical API reference.
+- **`dag.go` (`DagConfig`)**: Added `ErrorDrainTimeout time.Duration` field.
+- **`dag.go` (`DefaultDagConfig`)**: Sets `ErrorDrainTimeout: 5 * time.Second` as default.
+- **`dag.go` (`collectErrors`)**: Removed hardcoded `5 * time.Second` timeout.
+  Now reads `dag.Config.ErrorDrainTimeout`; falls back to 5 s when field is zero.
+- **`dag.go` (`reportError`)**: Replaced `Log.Printf` with structured logrus entry:
+  `Log.WithField("dag_id", ...).WithError(err).Warn(...)` for log-aggregation compatibility.
+- Remaining Stage-6 items deferred (ErrNoRunner structured type, ErrCount helper, ErrorPolicy enum).
+- `go test -race ./...` — **0 data races detected**.
+- `golangci-lint run ./...` — **0 issues**.
+
 ---
 
 ## Pending Items
 
-### Stage 6 — Error Handling & Observability Hardening (planned)
-- [ ] `collectErrors` 5 s hard-cap: make configurable via `DagConfig.ErrorDrainTimeout`.
+### Stage 7 — Error Handling Continuation (planned)
 - [ ] `ErrNoRunner` structured error type (currently `errors.New`); add `NodeID` field via `NodeError`.
-- [ ] `reportError` drop-log: replace `Log.Printf` with a structured log entry (logrus fields).
 - [ ] Add `Dag.ErrCount()` helper to expose current Errors channel depth without draining.
 - [ ] Consider `ErrorPolicy` enum: `FailFast` (current) vs `ContinueOnError`.
 
-### Stage 7 — Performance & Concurrency (planned)
+### Stage 8 — Performance & Concurrency (planned)
 - [ ] `DagWorkerPool.taskQueue` is a bare `chan func()` — evaluate replacing with `SafeChannel`.
 - [ ] `fanIn` goroutine: each node spawns a goroutine; explore bounded semaphore approach.
 - [ ] `merge` result channel (`mergeResult chan bool`) — evaluate promotion to `SafeChannel[bool]`.
 - [ ] Profile `TestComplexDag` under race detector; verify no data races.
 - [ ] `Progress()` uses two independent `atomic.LoadInt64` calls — not atomic as a pair; document limitation.
 
-### Stage 8 — Public API Hardening (planned)
+### Stage 9 — Public API Hardening (planned)
 - [ ] `DetectCycle` currently takes a `*Dag` with no lock; document that it must be called only when DAG mutation is complete (post-FinishDag) or add internal locking.
 - [ ] `CopyDag` does not copy `Config` or `workerPool`; document this or fix.
 - [ ] Godoc pass: all exported symbols must have comments (revive:exported rule already enforced).
@@ -105,3 +119,4 @@ Update this file at the start and end of every stage.
 | Runner priority | `Node.runnerVal` > `runnerResolver` > `ContainerCmd` | Resolved at execution time in `getRunnerSnapshot` |
 | Cycle detection | DFS + recStack (white/gray/black) | Called inside `FinishDag`; operates on `copyDag` snapshot |
 | Status transitions | `TransitionStatus(from, to)` CAS | Validates state-machine edge before lock; `SetStatus` kept for unconditional override only |
+| Error observability | `reportError` uses logrus fields | `dag_id` + `error` fields emitted on drop; `collectErrors` uses `DagConfig.ErrorDrainTimeout` |

@@ -48,13 +48,17 @@ const noNodeID = "-1"
 
 // ==================== 타입 정의 ====================
 
-// DagConfig DAG 구성 옵션을 정의함
+// DagConfig holds tunable parameters for a Dag instance.
 type DagConfig struct {
 	MinChannelBuffer int
 	MaxChannelBuffer int
 	StatusBuffer     int
 	WorkerPoolSize   int
 	DefaultTimeout   time.Duration
+
+	// ErrorDrainTimeout is the maximum time collectErrors will wait to drain the
+	// Errors channel.  Defaults to 5 s when left at zero (see DefaultDagConfig).
+	ErrorDrainTimeout time.Duration
 }
 
 // DagOption DAG 옵션 함수 타입
@@ -127,14 +131,15 @@ type Edge struct {
 
 // ==================== DAG 기본 및 옵션 함수 ====================
 
-// DefaultDagConfig 기본 DAG 구성을 반환
+// DefaultDagConfig returns a DagConfig with production-ready defaults.
 func DefaultDagConfig() DagConfig {
 	return DagConfig{
-		MinChannelBuffer: 5,                // 기본값 증가
-		MaxChannelBuffer: 100,              // 기존과 동일
-		StatusBuffer:     10,               // 기본값 증가
-		WorkerPoolSize:   50,               // 기본 워커 풀 크기
-		DefaultTimeout:   30 * time.Second, // 기본 타임아웃
+		MinChannelBuffer:  5,
+		MaxChannelBuffer:  100,
+		StatusBuffer:      10,
+		WorkerPoolSize:    50,
+		DefaultTimeout:    30 * time.Second,
+		ErrorDrainTimeout: 5 * time.Second,
 	}
 }
 
@@ -388,20 +393,29 @@ func (dag *Dag) StartDag() (*Dag, error) {
 }
 
 // reportError delivers err to the error channel in a non-blocking fashion.
+// When the channel is full or already closed the error is logged with
+// structured fields rather than silently discarded.
 func (dag *Dag) reportError(err error) {
 	if !dag.Errors.Send(err) {
-		// Channel is closed or full; log and drop.
-		Log.Printf("Error channel full or closed, dropping error: %v", err)
+		// Channel is closed or full: surface as a structured log entry so the
+		// event is observable in log aggregation pipelines (Loki, CloudWatch…).
+		Log.WithField("dag_id", dag.ID).
+			WithError(err).
+			Warn("error channel full or closed; dropping error")
 	}
 }
 
-// collectErrors drains the error channel until it is empty or ctx / a 5-second
-// hard timeout fires.
+// collectErrors drains the error channel until it is empty, or until
+// DagConfig.ErrorDrainTimeout (default 5 s) or ctx fires — whichever is first.
 func (dag *Dag) collectErrors(ctx context.Context) []error {
 	var errs []error
 
-	//nolint:mnd // 5 s hard cap; TODO: make configurable via DagConfig.
-	timeout := time.After(5 * time.Second)
+	drainTimeout := dag.Config.ErrorDrainTimeout
+	if drainTimeout <= 0 {
+		//nolint:mnd // 5 s safe fallback when ErrorDrainTimeout was not set in DagConfig.
+		drainTimeout = 5 * time.Second
+	}
+	timeout := time.After(drainTimeout)
 	ch := dag.Errors.GetChannel()
 
 	for {
