@@ -3,6 +3,7 @@ package dag_go
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1346,6 +1347,99 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ToMermaid generates a Mermaid flowchart string that represents the DAG topology.
+//
+// The output uses the "graph TD" (top-down) direction.  Synthetic nodes
+// (start_node / end_node) are rendered with a stadium shape to distinguish
+// infrastructure nodes from user-defined ones.  If a per-node Runnable has been
+// registered via SetNodeRunner, its concrete Go type is appended to the node
+// label after a line-break so the diagram shows which executor is bound to each
+// step — useful for debugging or documentation.
+//
+// Node IDs are sanitised for Mermaid syntax by replacing any character that is
+// not an ASCII letter, digit, or underscore with an underscore (see
+// mermaidSafeID).  This prevents parser errors for IDs that contain hyphens,
+// dots, or spaces.
+//
+// Example output:
+//
+//	graph TD
+//	    start_node(["start_node"])
+//	    A["A\n*main.MyRunner"]
+//	    B["B"]
+//	    end_node(["end_node"])
+//	    start_node --> A
+//	    A --> B
+//	    B --> end_node
+//
+// ToMermaid acquires a read-lock and is safe to call concurrently with
+// Progress() and other read-only observers.  It must be called after
+// FinishDag so that dag.Edges is complete; calling it before FinishDag will
+// produce a diagram that is missing the edges to the synthetic end node.
+func (dag *Dag) ToMermaid() string {
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+
+	var sb strings.Builder
+	sb.WriteString("graph TD\n")
+
+	// First pass — emit a labelled node definition for every node that appears
+	// in at least one edge.  Tracking emitted IDs prevents duplicate definitions
+	// when the same node appears as both parent and child in different edges.
+	defined := make(map[string]bool)
+	for _, edge := range dag.Edges {
+		for _, nodeID := range [2]string{edge.parentID, edge.childID} {
+			if defined[nodeID] {
+				continue
+			}
+			defined[nodeID] = true
+			mID := mermaidSafeID(nodeID)
+			n := dag.nodes[nodeID]
+			switch nodeID {
+			case StartNode, EndNode:
+				// Stadium shape visually distinguishes synthetic infrastructure nodes.
+				fmt.Fprintf(&sb, "    %s([\"%s\"])\n", mID, nodeID)
+			default:
+				label := nodeID
+				if n != nil {
+					if r := n.runnerLoad(); r != nil {
+						// Append the concrete runner type as a diagnostic hint.
+						label = fmt.Sprintf("%s\\n%T", nodeID, r)
+					}
+				}
+				fmt.Fprintf(&sb, "    %s[\"%s\"]\n", mID, label)
+			}
+		}
+	}
+
+	// Second pass — emit directed edges.
+	for _, edge := range dag.Edges {
+		fmt.Fprintf(&sb, "    %s --> %s\n",
+			mermaidSafeID(edge.parentID),
+			mermaidSafeID(edge.childID))
+	}
+
+	return sb.String()
+}
+
+// mermaidSafeID converts an arbitrary node ID to a Mermaid-safe identifier by
+// replacing any character that is not an ASCII letter, digit, or underscore
+// with an underscore.  This prevents syntax errors when node IDs contain
+// hyphens, spaces, dots, or other characters that would break the flowchart
+// parser.
+func mermaidSafeID(id string) string {
+	var b strings.Builder
+	b.Grow(len(id))
+	for _, c := range id {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' {
+			b.WriteRune(c)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
 
 // CopyDag creates a structural copy of original with a new ID.

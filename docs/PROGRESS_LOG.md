@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 9 — Public API Hardening (completed)
+## Current Status: Stage 10 — Examples, Visualisation & v1.0.0 Release Preparation (completed)
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -107,6 +107,25 @@ Update this file at the start and end of every stage.
 - `go test -race ./...` — **0 data races detected**.
 - `golangci-lint run ./...` — **0 issues**.
 
+### Stage 10 — Examples, Visualisation & v1.0.0 Release Preparation (completed)
+- **`dag.go` (`ToMermaid()`)**: New exported method — generates a Mermaid `graph TD` flowchart
+  string from `dag.Edges`.  Synthetic nodes use stadium shape (`([" "])`); per-node runner type
+  appended to label when set via `SetNodeRunner`.  `mermaidSafeID()` helper sanitises node IDs.
+  `"strings"` import added.
+- **`examples/etl_pipeline/main.go`**: Fan-out / fan-in ETL pipeline.  3 parallel ingest nodes →
+  validate → transform → load → report.  Per-node `SetNodeRunners` assignment.  Scenario 1 (all
+  succeed) and Scenario 2 (ingest_api fails → downstream Skipped) in a single binary.
+- **`examples/build_system/main.go`**: Multi-level build dependency graph.  3 parallel lib compiles →
+  compile_app → {unit_test, integ_test} → package_app → deploy.  Bulk `SetNodeRunners` with
+  typed `CompileRunner`/`TestRunner`/`PackageRunner`/`DeployRunner`.  `ToMermaid()` output shown.
+- **`examples/reset_retry/main.go`**: Transient-failure retry strategy.  `TransientRunner` with
+  atomic counter fails on attempt #1, succeeds on #2.  Demonstrates the full
+  `Reset() → ConnectRunner → GetReady → Start → Wait` reuse lifecycle.
+- **`docs/RELEASE_v1.0.0.md`**: Full release note covering API surface, lifecycle, state machine,
+  configuration reference, runner priority, examples, and known limitations.
+- `go build ./...` — **0 errors** (all examples compile as part of the same module).
+- `go test -race ./...` — **0 data races, all tests pass**.
+
 ---
 
 ## Pending Items
@@ -123,9 +142,12 @@ Update this file at the start and end of every stage.
 - [x] `TestDagReset`: two-run integration test verifying `Progress()` → 1.0 first run, `Progress()` → 0.0 after Reset, all nodes Pending, `Progress()` → 1.0 second run.
 - `workerPool` intentionally NOT copied by `CopyDag` (documented in godoc); each copy must call its own `GetReady`.
 
-### Stage 10 — Profiling & Advanced Optimisation (planned)
+### Stage 10 — Profiling & Advanced Optimisation (deferred to v1.1.0)
 - [ ] Profile `TestComplexDag` under race detector; identify hot paths.
 - [ ] Evaluate bounded semaphore for `preFlight` errgroup (currently hard-coded limit of 10).
+
+> Stage 10 (this session) was renamed to "Examples, Visualisation & v1.0.0 Release Preparation"
+> and is now **completed** (see Completed Items above).  The profiling work is deferred.
 
 ---
 
@@ -146,3 +168,4 @@ Update this file at the start and end of every stage.
 | `Progress()` | Two independent `atomic.LoadInt64` | Not an atomic pair; ratio may be slightly ahead between reads; acceptable for observability only |
 | `Dag.Reset()` | Channel recreation + node state wipe | Must be called only after `Wait` returns; rebuilds edge channels from `dag.Edges` slice so topology is preserved |
 | `CopyDag` | Structural copy | Copies `Config` and allocates new `NodesResult`/`Errors` channels; `workerPool`/`nodeResult`/`errLogs` intentionally not copied |
+| `Dag.ToMermaid()` | Read-only observer | Acquires `dag.mu.RLock()`; emits `graph TD` Mermaid; sanitises node IDs via `mermaidSafeID()`; appends `%T` runner hint when per-node runner is set |
