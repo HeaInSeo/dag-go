@@ -5,7 +5,7 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 4 — Cycle Detection Completion & Progress Tracking
+## Current Status: Stage 5 — Node Status Atomicity (CAS Pattern)
 
 **Branch:** `main`
 **Last updated:** 2026-02-27
@@ -49,25 +49,45 @@ Update this file at the start and end of every stage.
   - `TestDetectCycle_NoCycle`: diamond DAG — verifies FinishDag and DetectCycle both return clean.
 - All tests passing; lint 0 issues.
 
+### Stage 5 — Node Status Atomicity: CAS Pattern (current)
+- **`node.go`**: Added `isValidTransition(from, to NodeStatus) bool` state-machine helper.
+- **`node.go`**: Added `TransitionStatus(from, to NodeStatus) bool` — mutex-protected CAS:
+  - Validates the from→to edge against the state machine before acquiring the lock.
+  - Acquires `n.mu.Lock()`, checks `n.status == from`, writes `n.status = to`, returns true.
+  - Returns false (and leaves status unchanged) on invalid edge or wrong pre-condition.
+- **`node.go` (`CheckParentsStatus`)**: Replaced `SetStatus(Skipped)` with `TransitionStatus(Pending, Skipped)`.
+- **`node.go` (`inFlight`)**: Removed redundant `n.SetStatus(NodeStatusRunning)` (already set by `connectRunner`).
+- **`dag.go` (`connectRunner`)**:
+  - Removed redundant `n.SetStatus(NodeStatusSkipped)` after `!CheckParentsStatus()`.
+  - All six `SetStatus` calls replaced with `TransitionStatus` + `Log.Warnf` on rejection.
+  - State machine transitions enforced: Pending→Running, Running→{Succeeded,Failed}.
+- **`node_test.go`**: Four new test functions (13 sub-tests + concurrent scenarios):
+  - `TestTransitionStatus_ValidTransitions`: all 4 valid state-machine edges.
+  - `TestTransitionStatus_InvalidTransitions`: 6 illegal transitions — all blocked.
+  - `TestTransitionStatus_ConcurrentPendingToRunning`: 200 goroutines race; exactly 1 wins.
+  - `TestTransitionStatus_ConcurrentFullLifecycle`: 3-phase race (Pending→Running→terminal).
+- `go test -race ./...` — **0 data races detected**.
+- `golangci-lint run ./...` — **0 issues**.
+
 ---
 
 ## Pending Items
 
-### Stage 5 — Error Handling & Observability Hardening (planned)
+### Stage 6 — Error Handling & Observability Hardening (planned)
 - [ ] `collectErrors` 5 s hard-cap: make configurable via `DagConfig.ErrorDrainTimeout`.
 - [ ] `ErrNoRunner` structured error type (currently `errors.New`); add `NodeID` field via `NodeError`.
 - [ ] `reportError` drop-log: replace `Log.Printf` with a structured log entry (logrus fields).
 - [ ] Add `Dag.ErrCount()` helper to expose current Errors channel depth without draining.
 - [ ] Consider `ErrorPolicy` enum: `FailFast` (current) vs `ContinueOnError`.
 
-### Stage 6 — Performance & Concurrency (planned)
+### Stage 7 — Performance & Concurrency (planned)
 - [ ] `DagWorkerPool.taskQueue` is a bare `chan func()` — evaluate replacing with `SafeChannel`.
 - [ ] `fanIn` goroutine: each node spawns a goroutine; explore bounded semaphore approach.
 - [ ] `merge` result channel (`mergeResult chan bool`) — evaluate promotion to `SafeChannel[bool]`.
 - [ ] Profile `TestComplexDag` under race detector; verify no data races.
 - [ ] `Progress()` uses two independent `atomic.LoadInt64` calls — not atomic as a pair; document limitation.
 
-### Stage 7 — Public API Hardening (planned)
+### Stage 8 — Public API Hardening (planned)
 - [ ] `DetectCycle` currently takes a `*Dag` with no lock; document that it must be called only when DAG mutation is complete (post-FinishDag) or add internal locking.
 - [ ] `CopyDag` does not copy `Config` or `workerPool`; document this or fix.
 - [ ] Godoc pass: all exported symbols must have comments (revive:exported rule already enforced).
@@ -84,3 +104,4 @@ Update this file at the start and end of every stage.
 | Lock order | `Dag.mu` → `Node.mu` | Never invert; `SetNodeRunner` calls `runnerStore` directly (not `SetRunner`) to avoid re-entrant lock |
 | Runner priority | `Node.runnerVal` > `runnerResolver` > `ContainerCmd` | Resolved at execution time in `getRunnerSnapshot` |
 | Cycle detection | DFS + recStack (white/gray/black) | Called inside `FinishDag`; operates on `copyDag` snapshot |
+| Status transitions | `TransitionStatus(from, to)` CAS | Validates state-machine edge before lock; `SetStatus` kept for unconditional override only |

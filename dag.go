@@ -1012,13 +1012,12 @@ func DetectCycle(dag *Dag) bool {
 }
 
 // connectRunner connects a runner function to a node.
+//
+//nolint:gocognit // three-phase flight state machine with CAS guards; splitting would obscure the node lifecycle
 func connectRunner(n *Node) {
 	n.runner = func(ctx context.Context, result *SafeChannel[*printStatus]) {
-		// 헬퍼 함수: printStatus 값을 복사해 반환, 지우지 말것.
-		// 여기서 중요한 사항.
-		// 아래 코드를 보면 printStatus 새로운 복사본을 하나 만들어서 값을 넣어주는데, 포인터를 입력파라미터로 받았다.
-		// 그래서 만약 포인터나 슬라이스 등 참조형 필드를 포함한다면 얇은 복사가 이루어져서 잘못된 결과가 발생한다.
-		// 하지만, rStatus 는 int 이고 nodeId 는 string 이라서 즉, 기본형이라서 복사가 이루어진다. 따라서 원본의 값이 변경된다고 해도 해당 복사본의 값의 변경은 일어나지 않는다.
+		// copyStatus returns a shallow copy of ps. rStatus (int) and nodeID (string)
+		// are value types, so the copy is independent of the original pool object.
 		copyStatus := func(ps *printStatus) *printStatus {
 			return &printStatus{
 				rStatus: ps.rStatus,
@@ -1026,48 +1025,59 @@ func connectRunner(n *Node) {
 			}
 		}
 
-		// 부모 노드 상태 확인
+		// CheckParentsStatus internally calls TransitionStatus(Pending, Skipped)
+		// when a parent has failed, so no additional SetStatus call is needed here.
 		if !n.CheckParentsStatus() {
 			ps := newPrintStatus(PostFlightFailed, n.ID)
-			// 복사본을 만들어 SafeChannel 에 전송
 			result.Send(copyStatus(ps))
-			n.SetStatus(NodeStatusSkipped)
 			n.notifyChildren(Failed)
 			releasePrintStatus(ps)
 			return
 		}
 
-		n.SetStatus(NodeStatusRunning)
+		// Pending → Running: guarded CAS — rejects the transition if the node is
+		// not Pending (e.g. already Skipped by a concurrent parent failure).
+		if ok := n.TransitionStatus(NodeStatusPending, NodeStatusRunning); !ok {
+			Log.Warnf("connectRunner: Pending→Running rejected for node %s (status=%v)", n.ID, n.GetStatus())
+		}
 
-		// preFlight 단계 실행
+		// preFlight phase
 		ps := preFlight(ctx, n)
 		result.Send(copyStatus(ps))
 		if ps.rStatus == PreflightFailed {
-			n.SetStatus(NodeStatusFailed)
+			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
+				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
+			}
 			n.notifyChildren(Failed)
 			releasePrintStatus(ps)
 			return
 		}
 		releasePrintStatus(ps)
 
-		// inFlight 단계 실행
+		// inFlight phase
 		ps = inFlight(ctx, n)
 		result.Send(copyStatus(ps))
 		if ps.rStatus == InFlightFailed {
-			n.SetStatus(NodeStatusFailed)
+			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
+				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
+			}
 			n.notifyChildren(Failed)
 			releasePrintStatus(ps)
 			return
 		}
 		releasePrintStatus(ps)
 
-		// postFlight 단계 실행
+		// postFlight phase
 		ps = postFlight(n)
 		result.Send(copyStatus(ps))
 		if ps.rStatus == PostFlightFailed {
-			n.SetStatus(NodeStatusFailed)
+			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
+				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
+			}
 		} else {
-			n.SetStatus(NodeStatusSucceeded)
+			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusSucceeded); !ok {
+				Log.Warnf("connectRunner: Running→Succeeded rejected for node %s (status=%v)", n.ID, n.GetStatus())
+			}
 		}
 		releasePrintStatus(ps)
 	}

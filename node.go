@@ -63,6 +63,7 @@ type Node struct {
 }
 
 // SetStatus sets the node's status under the write lock.
+// Prefer TransitionStatus when a pre-condition on the current status is required.
 func (n *Node) SetStatus(status NodeStatus) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -74,6 +75,46 @@ func (n *Node) GetStatus() NodeStatus {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	return n.status
+}
+
+// isValidTransition reports whether the from→to NodeStatus edge exists in the
+// Node state machine.
+//
+// Valid transitions:
+//
+//	Pending  → Running | Skipped
+//	Running  → Succeeded | Failed
+//	Succeeded, Failed, Skipped → (terminal; no outgoing transitions)
+func isValidTransition(from, to NodeStatus) bool {
+	switch from {
+	case NodeStatusPending:
+		return to == NodeStatusRunning || to == NodeStatusSkipped
+	case NodeStatusRunning:
+		return to == NodeStatusSucceeded || to == NodeStatusFailed
+	default:
+		// Terminal states have no outgoing transitions.
+		return false
+	}
+}
+
+// TransitionStatus atomically advances n's status from `from` to `to`.
+// It returns true only when both conditions hold:
+//  1. n.status == from at the moment the lock is acquired, AND
+//  2. the from→to transition is permitted by the state machine.
+//
+// This prevents illegal backwards moves such as Failed→Succeeded.
+// Use SetStatus only when an unconditional override is explicitly required.
+func (n *Node) TransitionStatus(from, to NodeStatus) bool {
+	if !isValidTransition(from, to) {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.status != from {
+		return false
+	}
+	n.status = to
+	return true
 }
 
 // SetSucceed sets the succeed flag under the write lock.
@@ -90,12 +131,14 @@ func (n *Node) IsSucceed() bool {
 	return n.succeed
 }
 
-// CheckParentsStatus returns false (and marks this node Skipped) if any parent
-// has already failed.
+// CheckParentsStatus returns false (and transitions this node to Skipped) if any
+// parent has already failed.  The Pending→Skipped transition is guarded by
+// TransitionStatus so that a node in an unexpected state is never silently
+// overwritten.
 func (n *Node) CheckParentsStatus() bool {
 	for _, parent := range n.parent {
 		if parent.GetStatus() == NodeStatusFailed {
-			n.SetStatus(NodeStatusSkipped)
+			n.TransitionStatus(NodeStatusPending, NodeStatusSkipped)
 			return false
 		}
 	}
@@ -231,8 +274,9 @@ func inFlight(ctx context.Context, n *Node) *printStatus {
 	}
 
 	// General node execution.
+	// Note: status is already NodeStatusRunning, set by connectRunner via
+	// TransitionStatus(Pending, Running) before this function is called.
 	if n.IsSucceed() {
-		n.SetStatus(NodeStatusRunning)
 		if err := n.Execute(ctx); err != nil {
 			n.SetSucceed(false)
 			nodeErr := &NodeError{NodeID: n.ID, Phase: "inflight", Err: err}
