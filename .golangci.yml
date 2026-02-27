@@ -101,12 +101,12 @@ linters:
               desc: "controller-runtime 의존성은 이 라이브러리에서 금지된다."
 
     # --------------------------------------------------------------------------
-    # govet: copylock 분석기 활성화
-    # Node는 atomic.Value를 포함하므로 값 복사 시 panic을 유발한다.
+    # govet: copylocks analyser — detects value-copy of types that contain
+    # sync primitives (e.g. atomic.Value inside Node).
     # --------------------------------------------------------------------------
     govet:
       enable:
-        - copylock
+        - copylocks
         - shadow
 
     # --------------------------------------------------------------------------
