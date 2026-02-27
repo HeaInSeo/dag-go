@@ -12,6 +12,9 @@ import (
 	"go.uber.org/goleak"
 )
 
+// Compile-time interface check.
+var _ Runnable = DummyRunnable{}
+
 func TestInitDag(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	// InitDag 호출하여 새로운 Dag 인스턴스 생성
@@ -57,11 +60,10 @@ func TestInitDag(t *testing.T) {
 	}
 }
 
-// DummyRunnable 은 Runnable 인터페이스의 더미 구현체
+// DummyRunnable is a no-op implementation of Runnable used in tests.
 type DummyRunnable struct{}
 
-// DummyRunnable 이 Runnable 인터페이스를 구현하도록 필요한 메서드들을 정의
-func (DummyRunnable) RunE(_ interface{}) error {
+func (DummyRunnable) RunE(_ context.Context, _ interface{}) error {
 	return nil
 }
 
@@ -80,29 +82,27 @@ func TestCreateNode(t *testing.T) {
 	if node.ID != id {
 		t.Errorf("expected node id to be %s, got %s", id, node.ID)
 	}
-	// ContainerCmd 가 nil 이면 createNodeWithId 를 호출하므로 RunCommand 는 nil 이어야 함.
-	if node.RunCommand != nil {
-		t.Errorf("expected RunCommand to be nil when ContainerCmd is nil, got %v", node.RunCommand)
+	// With nil ContainerCmd the per-node runner should also be nil.
+	if r := node.runnerLoad(); r != nil {
+		t.Errorf("expected per-node runner to be nil when ContainerCmd is nil, got %v", r)
 	}
-	// parentDag 가 올바르게 설정되었는지 확인
+	// parentDag must be set to the owning DAG.
 	if node.parentDag != dag {
 		t.Errorf("expected parentDag to be set to dag, got %v", node.parentDag)
 	}
-	// dag.nodes 맵에 해당 노드가 등록되었는지 확인
+	// The node must be registered in dag.nodes.
 	if dag.nodes[id] != node {
 		t.Errorf("expected dag.nodes[%s] to be the created node", id)
 	}
-	// 같은 id로 다시 노드를 생성하면 nil 이 반환되어야 함.
+	// Creating the same id again must return nil.
 	if dup := dag.CreateNode(id); dup != nil {
 		t.Errorf("expected duplicate createNode call to return nil, got %v", dup)
 	}
 
 	// -------------------------------
-	// Case 2: ContainerCmd 가 non-nil 인 경우
+	// Case 2: ContainerCmd is non-nil
 	// -------------------------------
-	// 새로운 Dag 인스턴스 생성
 	dag2 := NewDag()
-	// DummyRunnable 을 ContainerCmd 에 할당하여 non-nil 인 경우를 테스트
 	dummy := DummyRunnable{}
 	dag2.ContainerCmd = dummy
 
@@ -114,15 +114,15 @@ func TestCreateNode(t *testing.T) {
 	if node2.ID != id2 {
 		t.Errorf("expected node2 id to be %s, got %s", id2, node2.ID)
 	}
-	// ContainerCmd 가 non-nil 이면 createNode(id, ContainerCmd)를 호출하므로, RunCommand 가 설정되어 있어야 함.
-	if node2.RunCommand == nil {
-		t.Errorf("expected RunCommand to be set when ContainerCmd is non-nil")
+	// When ContainerCmd is non-nil, getRunnerSnapshot() must resolve to it.
+	r := node2.getRunnerSnapshot()
+	if r == nil {
+		t.Errorf("expected runner to be resolved from ContainerCmd, got nil")
 	}
-	// 타입 검사를 통해 DummyRunnable 구현체가 맞는지 확인
-	if _, ok := node2.RunCommand.(DummyRunnable); !ok {
-		t.Errorf("expected RunCommand to be of type DummyRunnable, got %T", node2.RunCommand)
+	if _, ok := r.(DummyRunnable); !ok {
+		t.Errorf("expected runner to be DummyRunnable, got %T", r)
 	}
-	// 동일한 id로 다시 생성 시 nil 을 반환하는지 검증
+	// Duplicate creation must return nil.
 	if dup2 := dag2.CreateNode(id2); dup2 != nil {
 		t.Errorf("expected duplicate createNode call to return nil, got %v", dup2)
 	}
@@ -601,9 +601,10 @@ func TestDetectCycle(t *testing.T) {
 	}
 }
 
+// NoopCmd is a Runnable that succeeds immediately without performing any work.
 type NoopCmd struct{}
 
-func (NoopCmd) RunE(_ interface{}) error { return nil }
+func (NoopCmd) RunE(_ context.Context, _ interface{}) error { return nil }
 
 func TestSimpleDag(t *testing.T) {
 	defer goleak.VerifyNone(t)
@@ -668,9 +669,8 @@ func TestSimple1Dag(t *testing.T) {
 		DefaultTimeout:   30 * time.Second,
 	}
 
-	// ContainerCmd 를 사용하는 경우, 여기에 등록 (현재는 주석 처리)
-	// runnable := Connect()
-	// dag.SetContainerCmd(runnable)
+	// Attach a no-op runner so that all nodes succeed during inFlight.
+	dag.SetContainerCmd(NoopCmd{})
 
 	// 엣지 추가: DAG 의 노드들 간에 부모/자식 관계 구성
 	if err := dag.AddEdge(dag.StartNode.ID, "1"); err != nil {
@@ -721,13 +721,16 @@ func TestSimple1Dag(t *testing.T) {
 	}
 }
 
-// 간단한 실행 명령을 위한 인터페이스 구현
+// SimpleCommand simulates a short-lived task while respecting context cancellation.
 type SimpleCommand struct{}
 
-func (*SimpleCommand) RunE(_ interface{}) error {
-	// 간단한 작업 시뮬레이션
-	time.Sleep(100 * time.Millisecond)
-	return nil
+func (*SimpleCommand) RunE(ctx context.Context, _ interface{}) error {
+	select {
+	case <-time.After(100 * time.Millisecond):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // TestComplexDag 는 복잡한 DAG 구조를 테스트합니다.

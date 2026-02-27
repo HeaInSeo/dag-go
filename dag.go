@@ -93,9 +93,11 @@ type Dag struct {
 	NodesResult *SafeChannel[*printStatus]
 	nodeResult  []*SafeChannel[*printStatus]
 
-	// 에러를 모으는 용도.
+	// errLogs collects structured errors for post-mortem inspection.
 	errLogs []*systemError
-	Errors  chan error // 에러 채널 추가
+	// Errors is the concurrency-safe error channel; use reportError to write and
+	// collectErrors (or Errors.GetChannel()) to read.
+	Errors *SafeChannel[error]
 
 	// timeout
 	Timeout  time.Duration
@@ -148,7 +150,7 @@ func NewDagWithConfig(config DagConfig) *Dag {
 		ID:          uuid.NewString(),
 		NodesResult: NewSafeChannelGen[*printStatus](config.MaxChannelBuffer),
 		Config:      config,
-		Errors:      make(chan error, config.MaxChannelBuffer),
+		Errors:      NewSafeChannelGen[error](config.MaxChannelBuffer),
 	}
 }
 
@@ -231,19 +233,16 @@ func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
 
 	switch n.status {
 	case NodeStatusPending:
-
-		n.SetRunner(r)
-		// n.RunCommand = r
-		// n.runnerStore(r) // atomic.Value에는 *runnerSlot만 Store
+		// We already hold n.mu — call runnerStore directly to avoid re-entrant lock.
+		// (SetRunner would try to acquire n.mu again, causing a self-deadlock.)
+		n.runnerStore(r)
 		return true
 
 	case NodeStatusRunning, NodeStatusSucceeded, NodeStatusFailed, NodeStatusSkipped:
-		// 선택: 이유를 로깅해두면 추적이 쉬움
 		Log.Infof("SetNodeRunner ignored: node %s status=%v", n.ID, n.status)
 		return false
 
 	default:
-		// 혹시 모를 새 상태 대비
 		Log.Warnf("SetNodeRunner unknown status: node %s status=%v", n.ID, n.status)
 		return false
 	}
@@ -271,10 +270,7 @@ func (dag *Dag) SetNodeRunners(m map[string]Runnable) (applied int, missing, ski
 		n.mu.Lock()
 		switch n.status {
 		case NodeStatusPending:
-			// TODO 백워드 호환을 위해서 넣어둠. 향후 삭제하는 방향으로 진행해야 함.
-			// 사실 안전하지 않음.
-			n.RunCommand = r
-			// 반드시 atomic.Value에는 *runnerSlot 형태로 저장 (panic 방지)
+			// atomic.Value must always receive *runnerSlot to prevent a type-change panic.
 			n.runnerStore(r)
 			applied++
 
@@ -391,45 +387,42 @@ func (dag *Dag) StartDag() (*Dag, error) {
 	return dag, nil
 }
 
-// reportError reports an error to the error channel.
+// reportError delivers err to the error channel in a non-blocking fashion.
 func (dag *Dag) reportError(err error) {
-	select {
-	case dag.Errors <- err:
-		// 에러가 성공적으로 전송됨
-	default:
-		// 채널이 가득 찬 경우 로그에 기록
-		Log.Printf("Error channel full, dropping error: %v", err)
+	if !dag.Errors.Send(err) {
+		// Channel is closed or full; log and drop.
+		Log.Printf("Error channel full or closed, dropping error: %v", err)
 	}
 }
 
-// collectErrors collects errors from the error channel.
+// collectErrors drains the error channel until it is empty or ctx / a 5-second
+// hard timeout fires.
 func (dag *Dag) collectErrors(ctx context.Context) []error {
-	var errors []error
+	var errs []error
 
-	// 타임아웃 설정
-	//nolint:mnd // 추후 수정하자.
+	//nolint:mnd // 5 s hard cap; TODO: make configurable via DagConfig.
 	timeout := time.After(5 * time.Second)
+	ch := dag.Errors.GetChannel()
 
 	for {
 		select {
-		case err := <-dag.Errors:
-			errors = append(errors, err)
+		case err := <-ch:
+			errs = append(errs, err)
 		case <-timeout:
-			return errors
+			return errs
 		case <-ctx.Done():
-			return errors
+			return errs
 		default:
-			if len(errors) > 0 {
-				// 일정 시간 동안 새 에러가 없으면 반환
+			if len(errs) > 0 {
+				// Wait briefly for any in-flight errors before declaring done.
 				select {
-				case err := <-dag.Errors:
-					errors = append(errors, err)
-				case <-time.After(100 * time.Millisecond):
-					return errors
+				case err := <-ch:
+					errs = append(errs, err)
+				case <-time.After(100 * time.Millisecond): //nolint:mnd
+					return errs
 				}
 			} else {
-				// 에러가 없으면 짧게 대기
-				//nolint:mnd // 추후 수정하자.
+				//nolint:mnd // short poll sleep; TODO: replace with proper drain helper.
 				time.Sleep(10 * time.Millisecond)
 			}
 		}
@@ -487,6 +480,14 @@ func (dag *Dag) closeChannels() {
 			Log.Warnf("Failed to close nodeResult[%d] channel: %v", i, err)
 		} else {
 			Log.Infof("Closed nodeResult[%d] channel", i)
+		}
+	}
+
+	if dag.Errors != nil {
+		if err := dag.Errors.Close(); err != nil {
+			Log.Warnf("Failed to close Errors channel: %v", err)
+		} else {
+			Log.Info("Closed Errors channel")
 		}
 	}
 }
@@ -1050,7 +1051,7 @@ func connectRunner(n *Node) {
 		releasePrintStatus(ps)
 
 		// inFlight 단계 실행
-		ps = inFlight(n)
+		ps = inFlight(ctx, n)
 		result.Send(copyStatus(ps))
 		if ps.rStatus == InFlightFailed {
 			n.SetStatus(NodeStatusFailed)
