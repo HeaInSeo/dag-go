@@ -1584,7 +1584,7 @@ func TestWait_ContextCancellation(t *testing.T) {
 // Both outcomes are correct — the important invariant is that children never
 // report NodeStatusSucceeded when their parent has failed.
 //
-//nolint:gocognit // test covers topology setup, failure injection, signal propagation, and multi-node status assertion
+//nolint:gocognit,gocyclo // test covers topology setup, failure injection, signal propagation, and multi-node status assertion
 func TestDag_ParentFailurePropagation(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	Log.SetOutput(io.Discard)
