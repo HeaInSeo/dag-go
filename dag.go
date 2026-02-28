@@ -1388,10 +1388,8 @@ func fanIn(ctx context.Context, channels []*SafeChannel[*printStatus], merged *S
 	for _, sc := range channels {
 		eg.Go(func() error {
 			for val := range sc.GetChannel() {
-				select {
-				case <-egCtx.Done():
+				if !merged.SendBlocking(egCtx, val) {
 					return egCtx.Err()
-				case merged.GetChannel() <- val:
 				}
 			}
 			return nil

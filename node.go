@@ -202,7 +202,6 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 	eg.SetLimit(10)
 
 	i := len(n.parentVertex)
-	var try = true
 
 	for j := 0; j < i; j++ { //nolint:intrange
 		k := j // capture loop variable
@@ -210,7 +209,7 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 		if sc == nil {
 			Log.Fatalf("preFlight: n.parentVertex[%d] is nil for node %s", k, n.ID)
 		}
-		try = eg.TryGo(func() error {
+		eg.Go(func() error {
 			nodeID, chIdx := n.ID, k
 			lbl := pprof.Labels(
 				"phase", "preFlight",
@@ -237,13 +236,10 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 				return egCtx.Err()
 			}
 		})
-		if !try {
-			break
-		}
 	}
 
 	err := eg.Wait()
-	if err == nil && try {
+	if err == nil {
 		n.SetSucceed(true)
 		Log.Println("Preflight", n.ID)
 		return newPrintStatus(Preflight, n.ID)

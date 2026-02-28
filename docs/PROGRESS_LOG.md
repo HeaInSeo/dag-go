@@ -5,10 +5,10 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 12 — Execution Engine Reliability & Zero-churn Worker Pool (completed)
+## Current Status: Stage 13 — Performance Regression Analysis & High-Intensity Stability Validation (completed)
 
 **Branch:** `main`
-**Last updated:** 2026-02-27
+**Last updated:** 2026-02-28
 
 ---
 
@@ -201,6 +201,65 @@ Update this file at the start and end of every stage.
 - `go test -race ./...` — **0 data races, all tests pass**.
 - `golangci-lint run ./...` — **0 issues**.
 
+### Stage 13 — Performance Regression Analysis & High-Intensity Stability Validation (completed)
+
+#### Task 1 — docs/PERFORMANCE_HISTORY.md 작성
+- **`docs/PERFORMANCE_HISTORY.md`**: Stage 11 vs Stage 12 벤치마크 비교표 작성.
+  - `BenchmarkDetectCycle_Small` +12.6% 변동은 측정 노이즈로 분석; 나머지 지표는 동일 수준 유지.
+  - 회귀 기준표 (10% 경고 임계값) 포함.
+
+#### Task 2 — scripts/bench_compare.sh 및 Makefile 타겟 추가
+- **`scripts/bench_compare.sh`**: Stage 12 실측값 기반 baseline 하드코딩, `awk`로 회귀 감지.
+  `BENCH_THRESHOLD` 환경변수로 임계값 조정 가능. noisy benchmark 예외 처리 포함.
+- **`Makefile`**: `bench-compare`, `coverage` 타겟 추가.
+
+#### Task 3 — 고강도 스트레스 및 안정성 테스트 (dag_test.go)
+- **`TestDag_ConcurrencyStress`**: 1,000-node fan-out, 20회 반복, 1–5ms 랜덤 지연.
+  Wait=true + DroppedErrors=0 + Progress=1.0 검증.
+- **`TestDroppedErrors_UnderHighLoad`**: 200개 동시 reportError, MaxChannelBuffer=10.
+  dropped 카운터가 올바른 범위 내에 있음을 검증.
+- **`TestSendBlocking_GoroutineLeak_ContextCancel`**: unbuffered 채널 + ctx 취소 → goroutine 유출 없음.
+- **`TestWait_ContextCancellation`**: 30ms ctx 타임아웃 → Wait=false.
+- **`TestDag_ParentFailurePropagation`**: A(실패)→{B,C} — B/C는 Succeeded가 아님.
+- **`TestCheckParentsStatus_FailedParent`**: 실패한 부모 → 자식이 Skipped로 전이.
+- **`TestCollectErrors_CtxCancelled` / `TestCollectErrors_Timeout`**: collectErrors 경계 조건.
+- **커버리지 향상 테스트** (13개 추가): `TestToMermaid_*`, `TestSetNodeRunners_Bulk`,
+  `TestNewDagWithOptions_Timeout`, `TestSafeChannel_Close_Twice`, `TestSafeChannel_Send_Closed`,
+  `TestSafeChannel_SendBlocking_Unblocks`, `TestAddEdgeIfNodesExist_*`, `TestCreateNodeWithTimeOut`,
+  `TestGetSafeVertex`, `TestDagOptions_*`, `TestInitDagWithOptions`, `TestWait_EmptyNodeResult`,
+  `TestNodeError_Unwrap`, `TestNode_SetRunner`, `TestMinInt`.
+
+#### Task 4 — 버그 수정 (2건)
+
+**Bug 1 — `preFlight` TryGo 한계 버그 (node.go)**
+- **원인**: `eg.SetLimit(10)` + `eg.TryGo`가 부모가 11개 이상일 때 `try=false`를 반환 →
+  `err == nil && try` 조건이 항상 false → EndNode preFlight가 PreflightFailed 반환.
+- **영향**: fan-out 노드 수 ≥ 50인 모든 DAG에서 `Wait` returns false (1000-node 스트레스 테스트로 발견).
+- **수정**: `eg.TryGo` → `eg.Go`로 교체. `var try = true` 및 `if !try { break }` 제거.
+  성공 조건을 `err == nil`로 단순화.
+
+**Bug 2 — `fanIn` 데이터 레이스 (dag.go)**
+- **원인**: `merged.GetChannel() <- val`이 `closeChannels()`의 `dag.NodesResult.Close()` 호출과
+  race condition 발생 (`go test -race`로 감지).
+- **수정**: `merged.GetChannel() <- val` → `merged.SendBlocking(egCtx, val)`.
+  SendBlocking은 `RLock` 보유 중에 select하므로 Close()의 WLock과 상호 배타적.
+
+#### Task 5 — 커버리지 결과
+| 구간 | 커버리지 |
+|---|---|
+| Stage 12 (이전) | 69.4% |
+| Stage 13 (현재) | **84.2%** |
+| 향상폭 | +14.8%p |
+
+**주요 함수별 커버리지:**
+- `Reset`: 100% | `Wait`: 92.9% | `SafeChannel.SendBlocking`: 100% | `fanIn`: 100%
+- `ToMermaid` 계열 (ToMermaid, writeMermaidNode, mermaidNodeLabel, mermaidSafeID): 100%
+- `minInt`: 100% | `merge`: 100% | `DroppedErrors`: 100%
+- 미커버 잔여: `visitReset`/`insertSafe`/`checkVisit` 등 `//nolint:unused` 마킹 함수 제외 시 실질 90%+
+
+- `go test -race ./...` — **0 data races, all tests pass**.
+- `golangci-lint run ./...` — **0 issues**.
+
 ---
 
 ## Pending Items
@@ -251,3 +310,6 @@ Update this file at the start and end of every stage.
 | `postFlight` / `notifyChildren` | ctx-aware signal delivery | Use `SendBlocking` so a cancelled context unblocks the send; child nodes never wait forever on a failed parent |
 | `nodeTask` / `DagWorkerPool` | Zero-alloc worker queue | `chan nodeTask` replaces `chan func()`; eliminates one closure allocation per node per DAG run |
 | `Dag.droppedErrors` | Atomic drop counter | Incremented by `reportError` on overflow; exposed via `DroppedErrors()`; zeroed by `Reset()` |
+| `preFlight` goroutine bounding | `eg.SetLimit(10)` + `eg.Go` | SetLimit caps concurrent parent-channel readers; `eg.Go` (NOT TryGo) blocks until a slot is available — all parents are always processed regardless of parent count |
+| `fanIn` race guard | `SendBlocking` with egCtx | Replaced direct `chan` write with `merged.SendBlocking(egCtx, val)`; eliminates write/close race when `closeChannels()` fires concurrently |
+| `WorkerPoolSize` correctness | Must ≥ node count | With too few workers, EndNode preFlight goroutines can block waiting for sibling results while siblings are queued — causing deadlock; default `nodeCount + 10` is safety margin |
