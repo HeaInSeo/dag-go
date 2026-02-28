@@ -5,10 +5,11 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 13 — Performance Regression Analysis & High-Intensity Stability Validation (completed)
+## Current Status: Stage 13 — Performance Regression Analysis & High-Intensity Stability Validation (fully completed)
 
 **Branch:** `main`
 **Last updated:** 2026-02-28
+**Coverage:** 90.0% (목표 90%+ 달성)
 
 ---
 
@@ -244,18 +245,34 @@ Update this file at the start and end of every stage.
 - **수정**: `merged.GetChannel() <- val` → `merged.SendBlocking(egCtx, val)`.
   SendBlocking은 `RLock` 보유 중에 select하므로 Close()의 WLock과 상호 배타적.
 
-#### Task 5 — 커버리지 결과
+#### Task 5 — 커버리지 결과 (최종)
 | 구간 | 커버리지 |
 |---|---|
 | Stage 12 (이전) | 69.4% |
-| Stage 13 (현재) | **84.2%** |
-| 향상폭 | +14.8%p |
+| Stage 13 1차 커밋 (`a902ee8`) | 84.2% |
+| Stage 13 최종 (누적 커버리지 테스트 추가) | **90.0%** |
+| 향상폭 | +20.6%p |
 
-**주요 함수별 커버리지:**
-- `Reset`: 100% | `Wait`: 92.9% | `SafeChannel.SendBlocking`: 100% | `fanIn`: 100%
-- `ToMermaid` 계열 (ToMermaid, writeMermaidNode, mermaidNodeLabel, mermaidSafeID): 100%
-- `minInt`: 100% | `merge`: 100% | `DroppedErrors`: 100%
-- 미커버 잔여: `visitReset`/`insertSafe`/`checkVisit` 등 `//nolint:unused` 마킹 함수 제외 시 실질 90%+
+**추가된 커버리지 전용 테스트 (Stage 13 2차):**
+- `TestProgress_EmptyDAG`: `Progress()` nodeCount=0 조기 반환 경로
+- `TestPostFlight_NilNode`: `postFlight(nil)` nil 가드 경로
+- `TestPostFlight_CancelledCtx`: `postFlight` SendBlocking 취소 Warnf 경로
+- `TestCopyDag_WithStartAndEndNode`: `CopyDag` loop `case StartNode`/`case EndNode` 분기
+- `TestAddEndNode_NilFrom` / `TestAddEndNode_NilTo`: `addEndNode` nil 가드 경로
+- `TestAddEndNode_ExistingEdge`: `addEndNode` Exist 에러 경로
+- `TestPreFlight_DagDefaultTimeout`: `preFlight` DAG-레벨 `DefaultTimeout` 브랜치
+- `TestNotifyChildren_CancelledCtx`: `notifyChildren` SendBlocking 취소 Warnf 경로
+- `TestConnectRunner_EmptyDAG`: `ConnectRunner` 조기 반환 경로
+- `TestGetReady_EmptyDAG`: `GetReady` 조기 반환 경로
+- `TestFinishDag_SingleNonStartNode`: `FinishDag` 단일 비-StartNode 에러 경로
+
+**주요 함수별 커버리지 (최종):**
+- `Reset`: 100% | `Wait`: 92.9% | `SafeChannel.SendBlocking`: 100% | `fanIn`: 87.5%
+- `ToMermaid` 계열: 100% | `minInt`: 100% | `merge`: 100% | `DroppedErrors`: 100%
+- `addEndNode`: 94.4% | `FinishDag`: 93.3% | `postFlight`: 100% | `notifyChildren`: 100%
+- 미커버 잔여: `visitReset`/`insertSafe`/`checkVisit`/`getNode`/`getNextNode` (`//nolint:unused` 마킹)
+
+스트레스 테스트 (수백 회 반복 실행): **데드락 0건, 고루틴 유출 0건**.
 
 - `go test -race ./...` — **0 data races, all tests pass**.
 - `golangci-lint run ./...` — **0 issues**.

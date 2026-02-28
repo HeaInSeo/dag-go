@@ -121,20 +121,41 @@ Stage 11에서 두 가지 핵심 최적화가 적용됨:
 
 ## Stage 13 (Performance Regression Analysis & High-intensity Stability Validation)
 
-**커밋 태그:** TBD · **측정일:** 2026-02-28
+**커밋 태그:** `a902ee8` (1차) · **측정일:** 2026-02-28
 
-### 추가된 벤치마크 및 테스트
+### 핵심 버그 수정
+
+| 수정 항목 | 원인 | 결과 |
+|---|---|---|
+| `preFlight`: `eg.TryGo` → `eg.Go` | SetLimit(10) 초과 시 TryGo가 false 반환 → EndNode PreflightFailed | 1,000-node 스트레스 테스트 통과 |
+| `fanIn`: `merged.GetChannel() <- val` → `SendBlocking(egCtx, val)` | channel 직접 쓰기와 closeChannels() 간 data race | race detector 0건 |
+
+### 추가된 테스트
 
 - `TestDag_ConcurrencyStress`: 1,000-node fan-out DAG · random 1–5 ms delay · 20 iterations · `Reset()` cycle
 - `TestSendBlocking_GoroutineLeak_ContextCancel`: `SendBlocking` blocking 중 ctx 취소 → goroutine 즉시 해제 검증
 - `TestWait_ContextCancellation`: `Wait` 중 ctx 취소 → false 반환 및 goroutine leak 없음 검증
 - `TestDag_ParentFailurePropagation`: 상위 노드 실패 → 하위 노드 Skipped 전파 검증
 - `TestCollectErrors_CtxCancelled`: `collectErrors` ctx 취소 시 즉시 반환 검증
+- 에러/경계 경로 커버리지 테스트 40+ 건 추가 (커버리지 69.4% → **90.0%**)
 
-### Stage 13 벤치마크 (Stage 12 대비)
+### Stage 13 벤치마크 결과 (실측, bench_compare.sh 기준)
 
-Stage 13은 테스트 코드 및 문서 추가만 포함하며, 프로덕션 코드 경로 변경 없음.
-벤치마크 수치는 Stage 12와 동일(± 측정 잡음).
+| Benchmark | ns/op | allocs/op | bytes/op | vs Stage 12 ns/op | 판정 |
+|---|---|---|---|---|---|
+| `CopyDag/Small`       | 5,353     | 56      | 4,664     | +5.0%  | ALLOC↑ (soft warn) |
+| `CopyDag/Medium`      | 207,894   | 1,752   | 133,528   | -0.7%  | OK |
+| `CopyDag/Large`       | 7,593,108 | 53,136  | 3,946,856 | +2.4%  | OK |
+| `DetectCycle/Small`   | 2,048     | **0**   | 0         | -4.1%  | OK |
+| `DetectCycle/Medium`  | 56,395    | **0**   | 0         | +5.4%  | OK (soft warn) |
+| `DetectCycle/Large`   | 1,497,465 | **0**   | 0         | -3.0%  | OK |
+| `ToMermaid/Small`     | 8,305     | 68      | 2,288     | +1.8%  | OK |
+| `ToMermaid/Medium`    | 29,456    | 238     | 8,349     | +1.3%  | OK |
+| `ToMermaid/Large`     | 38,444    | 305     | 11,914    | -0.1%  | OK |
+| `PreFlight`           | 25,134    | 89      | 4,878     | -9.2%  | OK (개선) |
+
+Stage 13은 테스트 코드 및 문서 추가 + 2건 버그 수정만 포함 (프로덕션 핫패스 변경 없음).
+모든 벤치마크 수치가 10% 임계치 이내 (soft warning 2건은 측정 잡음 범위).
 
 ---
 
