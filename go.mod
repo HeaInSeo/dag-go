@@ -1,6 +1,6 @@
 module github.com/seoyhaein/dag-go
 
-go 1.24.0
+go 1.25.5
 
 toolchain go1.24.7
 
