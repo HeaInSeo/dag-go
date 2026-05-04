@@ -3293,3 +3293,173 @@ func TestSafeChannel_SendBlocking_UnblocksOnClose(t *testing.T) {
 		t.Fatal("SendBlocking deadlocked: did not unblock after Close()")
 	}
 }
+
+// TestGetReady_WithoutConnectRunner_NoPanic verifies that GetReady returns
+// false (not panic) when ConnectRunner has not been called.
+func TestGetReady_WithoutConnectRunner_NoPanic(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	// ConnectRunner deliberately NOT called.
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if dag.GetReady(ctx) {
+		t.Fatal("GetReady must return false when ConnectRunner was not called")
+	}
+}
+
+// TestGetReady_BeforeFinishDag_ReturnsFalse verifies that GetReady returns
+// false when FinishDag has not been called yet.
+func TestGetReady_BeforeFinishDag_ReturnsFalse(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	// FinishDag deliberately NOT called; ConnectRunner won't help without it.
+	dag.ConnectRunner() //nolint:errcheck // returns false, expected
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	if dag.GetReady(ctx) {
+		t.Fatal("GetReady must return false when FinishDag has not been called")
+	}
+}
+
+// TestAddEdge_StartNodeAsTarget_Rejected verifies that using start_node as an
+// edge target is rejected by both AddEdge and AddEdgeIfNodesExist.
+func TestAddEdge_StartNodeAsTarget_Rejected(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	dag.CreateNode("A")
+
+	if err := dag.AddEdge("A", StartNode); err == nil {
+		t.Error("AddEdge(A, start_node) must return error")
+	}
+	if err := dag.AddEdgeIfNodesExist("A", StartNode); err == nil {
+		t.Error("AddEdgeIfNodesExist(A, start_node) must return error")
+	}
+	dag.Errors.Close() //nolint:errcheck
+}
+
+// TestAddEdge_EndNodeInvolved_Rejected verifies that end_node cannot appear
+// as either from or to in a public AddEdge / AddEdgeIfNodesExist call.
+func TestAddEdge_EndNodeInvolved_Rejected(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	dag.CreateNode("A")
+
+	cases := [][2]string{
+		{StartNode, EndNode},
+		{EndNode, "A"},
+	}
+	for _, c := range cases {
+		if addErr := dag.AddEdge(c[0], c[1]); addErr == nil {
+			t.Errorf("AddEdge(%s, %s) must return error", c[0], c[1])
+		}
+		if addErr := dag.AddEdgeIfNodesExist(c[0], c[1]); addErr == nil {
+			t.Errorf("AddEdgeIfNodesExist(%s, %s) must return error", c[0], c[1])
+		}
+	}
+	dag.Errors.Close() //nolint:errcheck
+}
+
+// TestFinishDag_RejectsNodeNotReachableFromStart verifies that FinishDag
+// returns an error when a node component is not connected to start_node.
+func TestFinishDag_RejectsNodeNotReachableFromStart(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	// start_node → X is valid, but A → B is a disconnected component.
+	if addErr := dag.AddEdge(StartNode, "X"); addErr != nil {
+		t.Fatalf("AddEdge: %v", addErr)
+	}
+	// Inject isolated component directly to bypass AddEdge validation.
+	dag.mu.Lock()
+	dag.createNode("A")
+	dag.createNode("B")
+	dag.mu.Unlock()
+	dag.nodes["A"].children = append(dag.nodes["A"].children, dag.nodes["B"])
+	dag.nodes["B"].parent = append(dag.nodes["B"].parent, dag.nodes["A"])
+
+	if finishErr := dag.FinishDag(); finishErr == nil {
+		t.Fatal("FinishDag must reject nodes not reachable from start_node")
+	}
+	dag.Errors.Close() //nolint:errcheck
+}
+
+// TestCopyDag_IsExecutable verifies that a CopyDag result can be run through
+// the full ConnectRunner → GetReady → Start → Wait lifecycle.
+func TestCopyDag_IsExecutable(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	original, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := original.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := original.AddEdge("A", "B"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := original.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	copied := CopyDag(original, "copy-1")
+	if copied == nil {
+		t.Fatal("CopyDag returned nil")
+	}
+
+	copied.SetContainerCmd(NoopCmd{})
+	if !copied.ConnectRunner() {
+		t.Fatal("ConnectRunner on copy failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !copied.GetReady(ctx) {
+		t.Fatal("GetReady on copy failed")
+	}
+	if !copied.Start() {
+		t.Fatal("Start on copy failed")
+	}
+	if !copied.Wait(ctx) {
+		t.Fatal("Wait on copy failed — CopyDag did not produce an executable DAG")
+	}
+}

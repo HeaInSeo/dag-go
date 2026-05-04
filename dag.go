@@ -854,6 +854,8 @@ func (dag *Dag) createNodeWithTimeOut(id string, ti time.Duration) *Node {
 
 // AddEdge adds an edge between two nodes with improved error handling.
 // Returns an error if the DAG has already been finalized by FinishDag.
+//
+//nolint:gocognit // input validation + reserved-ID rules + node creation; each branch is simple but their total count is high
 func (dag *Dag) AddEdge(from, to string) error {
 	// 에러 로그를 기록하고 반환하는 클로저 함수
 	logErr := func(err error) error {
@@ -880,15 +882,23 @@ func (dag *Dag) AddEdge(from, to string) error {
 		return logErr(fmt.Errorf("DAG is already finalized: AddEdge is not allowed after FinishDag"))
 	}
 
+	// Reserved edge rules (enforced under the lock to be thread-safe):
+	//   to   == StartNode → rejected: StartNode is a synthetic entry node; it
+	//                        must never have user-defined parents.
+	//   from == EndNode   → rejected: EndNode is a synthetic sink managed
+	//                        exclusively by FinishDag.
+	//   to   == EndNode   → rejected: same reason.
+	if to == StartNode {
+		return logErr(fmt.Errorf("start_node cannot be an edge target"))
+	}
+	if from == EndNode || to == EndNode {
+		return logErr(fmt.Errorf("end_node is managed internally by FinishDag"))
+	}
+
 	// 노드를 가져오거나 생성하는 클로저 함수
 	getOrCreateNode := func(id string) (*Node, error) {
 		if node := dag.nodes[id]; node != nil {
 			return node, nil
-		}
-		// Reject implicit creation of synthetic reserved nodes.  start_node is
-		// created only by StartDag; end_node only by FinishDag.
-		if id == EndNode {
-			return nil, logErr(fmt.Errorf("%s: reserved node ID cannot be used as an edge target before FinishDag", id))
 		}
 		node := dag.createNode(id)
 		if node == nil {
@@ -949,6 +959,14 @@ func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
 
 	if dag.validated {
 		return logErr(fmt.Errorf("DAG is already finalized: AddEdgeIfNodesExist is not allowed after FinishDag"))
+	}
+
+	// Same reserved edge rules as AddEdge.
+	if to == StartNode {
+		return logErr(fmt.Errorf("start_node cannot be an edge target"))
+	}
+	if from == EndNode || to == EndNode {
+		return logErr(fmt.Errorf("end_node is managed internally by FinishDag"))
 	}
 
 	// 노드를 가져오는 클로저 함수: 노드가 없으면 에러 리턴
@@ -1025,7 +1043,7 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error {
 
 // FinishDag finalizes the DAG by connecting end nodes and validating the structure.
 //
-//nolint:gocognit // DAG finalization requires multiple sequential validation steps; splitting would obscure the overall flow
+//nolint:gocognit,gocyclo // DAG finalization requires multiple sequential validation steps; splitting would obscure the overall flow
 func (dag *Dag) FinishDag() error {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
@@ -1058,6 +1076,11 @@ func (dag *Dag) FinishDag() error {
 	// that a failed FinishDag leaves the DAG in exactly the state it was in
 	// before the call.
 
+	// StartNode must exist: it is created by StartDag / InitDag.
+	if dag.startNode == nil {
+		return logErr(fmt.Errorf("start node is missing; call StartDag or InitDag before FinishDag"))
+	}
+
 	for _, n := range nodes {
 		// 부모와 자식이 없는 고립된 노드가 있는 경우
 		if len(n.children) == 0 && len(n.parent) == 0 {
@@ -1068,6 +1091,20 @@ func (dag *Dag) FinishDag() error {
 			} else {
 				return logErr(fmt.Errorf("node '%s' has no parent and no children", n.ID))
 			}
+		}
+	}
+
+	// Reachability check: every user-defined node must be reachable from
+	// StartNode via forward edges.  A disconnected component would bypass the
+	// Start() trigger — its preFlight passes immediately (no parentVertex) and
+	// the nodes begin executing as soon as GetReady is called.
+	reachable := reachableFromStart(dag)
+	for _, n := range nodes {
+		if n.ID == StartNode {
+			continue
+		}
+		if !reachable[n.ID] {
+			return logErr(fmt.Errorf("node %q is not reachable from start_node", n.ID))
 		}
 	}
 
@@ -1207,11 +1244,13 @@ func (dag *Dag) ConnectRunner() bool {
 // execution slot; the slot is acquired inside connectRunner just before inFlight
 // (RunE) so that a small WorkerPoolSize cannot deadlock the graph.
 //
-// Call GetReady after ConnectRunner and before Start.  ctx is forwarded to each
-// node's runner function; cancel it to abort the entire execution.
+// Prerequisites (returns false if violated):
+//   - ctx must be non-nil
+//   - FinishDag must have been called (dag.validated == true)
+//   - ConnectRunner must have been called (every node.runner must be non-nil)
+//   - GetReady must not have been called already (nodeResult == nil)
 //
-// Returns false if the DAG has no nodes or GetReady has already been called
-// (i.e. nodeResult is already set).
+// ctx is forwarded to each node's runner; cancel it to abort the entire execution.
 func (dag *Dag) GetReady(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -1225,10 +1264,30 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 		return false
 	}
 
+	// DAG must be finalized before execution can begin.
+	if !dag.validated {
+		Log.Warn("GetReady: FinishDag has not been called; call FinishDag before GetReady")
+		return false
+	}
+	if dag.startNode == nil || dag.endNode == nil {
+		Log.Warn("GetReady: start or end node is missing")
+		return false
+	}
+
 	// Guard against double-call: check before launching any goroutines so that
 	// a second call is a no-op and does not spawn duplicate goroutines.
 	if dag.nodeResult != nil {
 		return false
+	}
+
+	// Every node must have a runner attached by ConnectRunner.  A nil runner
+	// causes a nil function call panic inside the goroutine; return false early
+	// so the caller gets a clear signal instead of an unrecoverable crash.
+	for _, v := range dag.nodes {
+		if v.runner == nil {
+			Log.Errorf("GetReady: node %s has no runner; call ConnectRunner before GetReady", v.ID)
+			return false
+		}
 	}
 
 	// Semaphore capacity = WorkerPoolSize caps concurrent inFlight executions.
@@ -1378,6 +1437,25 @@ var dfsStatePool = sync.Pool{
 			recStack: make(map[string]bool),
 		}
 	},
+}
+
+// reachableFromStart performs a forward DFS from dag.startNode and returns the
+// set of reachable node IDs.  The caller must hold dag.mu in any mode.
+// FinishDag calls this directly because it already holds dag.mu.Lock().
+func reachableFromStart(dag *Dag) map[string]bool {
+	visited := make(map[string]bool, len(dag.nodes))
+	var dfs func(*Node)
+	dfs = func(n *Node) {
+		if n == nil || visited[n.ID] {
+			return
+		}
+		visited[n.ID] = true
+		for _, child := range n.children {
+			dfs(child)
+		}
+	}
+	dfs(dag.startNode)
+	return visited
 }
 
 // detectCycleDFS detects cycles using DFS.
@@ -1747,16 +1825,17 @@ func mermaidEscapeLabel(s string) string {
 	return s
 }
 
-// CopyDag creates a structural copy of original with a new ID.
+// CopyDag creates a fully executable copy of original with a new ID.
 //
-// The copy preserves the graph topology (nodes, edges, parent/child relationships)
-// and all DagConfig values.  It owns independent channels (NodesResult, Errors,
-// edge safeVertices) so executing the copy cannot affect the original.
+// The copy preserves the graph topology (nodes, edges, parent/child
+// relationships) and all DagConfig values.  Fresh execution channels
+// (NodesResult, Errors, edge safeVertices, start-node trigger) are created so
+// running the copy cannot affect the original.
 //
 // Items NOT copied: per-node runners (Node.runnerVal), execSem, nodeResult,
 // errLogs, and runnerResolver.  Per-node runners are intentionally excluded
-// because they are stateful closures tied to the original DAG's channels.
-// The caller must wire runners and call the standard lifecycle on the copy:
+// because they are stateful closures bound to the original DAG's channels.
+// The caller must wire runners and follow the standard lifecycle on the copy:
 //
 //	ConnectRunner → GetReady → Start → Wait
 //
@@ -1775,17 +1854,17 @@ func CopyDag(original *Dag, newID string) *Dag {
 		bTimeout:     original.bTimeout,
 		ContainerCmd: original.ContainerCmd,
 		validated:    original.validated,
-		Config:       original.Config, // copy all DagConfig fields
+		Config:       original.Config,
 		NodesResult:  NewSafeChannelGen[*printStatus](original.Config.MaxChannelBuffer),
 		Errors:       NewSafeChannelGen[error](original.Config.MaxChannelBuffer),
 	}
 
-	// 노드와 간선 복사
+	// Copy graph topology (node IDs + parent/child pointers).
 	newNodes, newEdges := copyDag(original)
 	copied.nodes = newNodes
 	copied.edges = newEdges
 
-	// 노드에 새 DAG 참조를 설정하고 시작/종료 노드 확인
+	// Set parentDag and identify synthetic nodes.
 	for _, node := range newNodes {
 		node.parentDag = copied
 		switch node.ID {
@@ -1793,6 +1872,28 @@ func CopyDag(original *Dag, newID string) *Dag {
 			copied.startNode = node
 		case EndNode:
 			copied.endNode = node
+		}
+	}
+
+	// Preserve user-node count so Progress() and MarkCompleted() work correctly.
+	atomic.StoreInt64(&copied.nodeCount, atomic.LoadInt64(&original.nodeCount))
+
+	// Wire execution channels — mirrors the channel-wiring half of Reset().
+	// Without this step the copy has no parentVertex / childrenVertex entries:
+	// preFlight immediately passes for every node (no channels to wait on) and
+	// Start() returns false (startNode.parentVertex is empty).
+	if copied.startNode != nil {
+		copied.startNode.parentVertex = []*SafeChannel[runningStatus]{
+			NewSafeChannelGen[runningStatus](copied.Config.MinChannelBuffer),
+		}
+	}
+	for _, edge := range copied.edges {
+		edge.safeVertex = NewSafeChannelGen[runningStatus](copied.Config.MinChannelBuffer)
+		if parent := copied.nodes[edge.parentID]; parent != nil {
+			parent.childrenVertex = append(parent.childrenVertex, edge.safeVertex)
+		}
+		if child := copied.nodes[edge.childID]; child != nil {
+			child.parentVertex = append(child.parentVertex, edge.safeVertex)
 		}
 	}
 
