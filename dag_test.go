@@ -28,26 +28,26 @@ func TestInitDag(t *testing.T) {
 	}
 
 	// StartNode 가 nil 이 아닌지 확인
-	if dag.StartNode == nil {
+	if dag.startNode == nil {
 		t.Fatal("StartNode is nil")
 	}
 
 	// StartNode 의 Id가 올바르게 설정되었는지 확인 (예: StartNode 상수와 일치하는지)
-	if dag.StartNode.ID != StartNode {
-		t.Errorf("Expected StartNode Id to be %s, got %s", StartNode, dag.StartNode.ID)
+	if dag.startNode.ID != StartNode {
+		t.Errorf("Expected StartNode Id to be %s, got %s", StartNode, dag.startNode.ID)
 	}
 
 	// StartNode 의 parentVertex 에 SafeChannel 이 추가되었는지 확인
-	if len(dag.StartNode.parentVertex) == 0 {
+	if len(dag.startNode.parentVertex) == 0 {
 		t.Error("StartNode's parentVertex channel is not set")
 	} else {
 		// parentVertex 의 갯수가 정확히 1개인지 검사, 1개로 설정함.
-		if len(dag.StartNode.parentVertex) != 1 {
-			t.Errorf("Expected StartNode.parentVertex count to be 1, got %d", len(dag.StartNode.parentVertex))
+		if len(dag.startNode.parentVertex) != 1 {
+			t.Errorf("Expected StartNode.parentVertex count to be 1, got %d", len(dag.startNode.parentVertex))
 		}
 
 		// 첫 번째 SafeChannel 의 내부 채널 용량을 확인
-		safeCh := dag.StartNode.parentVertex[0]
+		safeCh := dag.startNode.parentVertex[0]
 		if cap(safeCh.GetChannel()) != dag.Config.MinChannelBuffer {
 			t.Errorf("Expected parentVertex channel capacity to be %d, got %d", dag.Config.MinChannelBuffer, cap(safeCh.GetChannel()))
 		}
@@ -134,7 +134,7 @@ func TestCreateEdge(t *testing.T) {
 	// 새로운 Dag 인스턴스 생성 (노드와 엣지 초기화)
 	dag := &Dag{
 		nodes: make(map[string]*Node),
-		Edges: []*Edge{},
+		edges: []*Edge{},
 	}
 	// 기본 구성 설정
 	dag.Config = DefaultDagConfig()
@@ -175,9 +175,9 @@ func TestCreateEdge(t *testing.T) {
 	if cap(edge.safeVertex.GetChannel()) != dag.Config.MinChannelBuffer {
 		t.Errorf("expected vertex channel capacity to be %d, got %d", dag.Config.MinChannelBuffer, cap(edge.safeVertex.GetChannel()))
 	}
-	// dag.Edges 에 엣지가 추가되었는지 확인
-	if len(dag.Edges) != 1 {
-		t.Errorf("expected dag.Edges length to be 1, got %d", len(dag.Edges))
+	// dag.edges 에 엣지가 추가되었는지 확인
+	if len(dag.edges) != 1 {
+		t.Errorf("expected dag.edges length to be 1, got %d", len(dag.edges))
 	}
 
 	// Case 4: 중복된 엣지 생성 시도 -> nil 과 Exist 에러 반환
@@ -261,9 +261,9 @@ func TestAddEdge(t *testing.T) {
 		t.Error("node1 not found as a parent of node2")
 	}
 
-	// dag.Edges 슬라이스에 엣지가 추가되었는지 확인 (정확히 1개의 엣지)
-	if len(dag.Edges) != 1 {
-		t.Errorf("expected 1 edge in dag.Edges, got %d", len(dag.Edges))
+	// dag.edges 슬라이스에 엣지가 추가되었는지 확인 (정확히 1개의 엣지)
+	if len(dag.edges) != 1 {
+		t.Errorf("expected 1 edge in dag.edges, got %d", len(dag.edges))
 	}
 
 	// node1의 childrenVertex 와 node2의 parentVertex 가 채워졌는지 확인
@@ -315,7 +315,7 @@ func TestCopyDag(t *testing.T) {
 		nodeD.ID: nodeD,
 	}
 
-	dag.Edges = []*Edge{
+	dag.edges = []*Edge{
 		{parentID: "A", childID: "B"},
 		{parentID: "A", childID: "C"},
 		{parentID: "B", childID: "D"},
@@ -349,10 +349,10 @@ func TestCopyDag(t *testing.T) {
 	}
 
 	// 5. 간선 복사 검증
-	if len(newEdges) != len(dag.Edges) {
-		t.Errorf("expected %d edges, got %d", len(dag.Edges), len(newEdges))
+	if len(newEdges) != len(dag.edges) {
+		t.Errorf("expected %d edges, got %d", len(dag.edges), len(newEdges))
 	}
-	for i, origEdge := range dag.Edges {
+	for i, origEdge := range dag.edges {
 		newEdge := newEdges[i]
 		if newEdge.parentID != origEdge.parentID || newEdge.childID != origEdge.childID {
 			t.Errorf("edge %d: expected %s -> %s, got %s -> %s",
@@ -385,7 +385,7 @@ func TestCopyDags(t *testing.T) {
 		nodeD.ID: nodeD,
 	}
 
-	dag.Edges = []*Edge{
+	dag.edges = []*Edge{
 		{parentID: "A", childID: "B"},
 		{parentID: "A", childID: "C"},
 		{parentID: "B", childID: "D"},
@@ -464,7 +464,7 @@ func TestCopyDagIndependence(t *testing.T) {
 		childID:  "B",
 		// CopyDag 에서는 vertex 등의 추가 정보는 복사하지 않으므로 생략함.
 	}
-	orig.Edges = []*Edge{edgeAB}
+	orig.edges = []*Edge{edgeAB}
 
 	// 2. CopyDag 함수를 호출하여 복사본 생성
 	newDag := CopyDag(orig, "copied-id")
@@ -546,11 +546,11 @@ func TestCopyDagIndependence(t *testing.T) {
 	}
 
 	// 5. 간선 독립성 검증
-	if len(newDag.Edges) != len(orig.Edges) {
-		t.Errorf("expected %d edges, got %d", len(orig.Edges), len(newDag.Edges))
+	if len(newDag.edges) != len(orig.edges) {
+		t.Errorf("expected %d edges, got %d", len(orig.edges), len(newDag.edges))
 	}
-	for i, origEdge := range orig.Edges {
-		newEdge := newDag.Edges[i]
+	for i, origEdge := range orig.edges {
+		newEdge := newDag.edges[i]
 		if newEdge.parentID != origEdge.parentID || newEdge.childID != origEdge.childID {
 			t.Errorf("edge %d: expected parent %s->child %s, got parent %s->child %s",
 				i, origEdge.parentID, origEdge.childID, newEdge.parentID, newEdge.childID)
@@ -661,7 +661,7 @@ func TestDetectCycle(t *testing.T) {
 	dag, _ := InitDag()
 
 	// 엣지 추가
-	if err := dag.AddEdge(dag.StartNode.ID, "1"); err != nil {
+	if err := dag.AddEdge(dag.startNode.ID, "1"); err != nil {
 		t.Fatalf("failed to add edge from StartNode to '1': %v", err)
 	}
 	if err := dag.AddEdge("1", "2"); err != nil {
@@ -706,7 +706,7 @@ func TestSimpleDag(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	dag, _ := InitDag()
 	// 엣지 추가
-	if err := dag.AddEdge(dag.StartNode.ID, "1"); err != nil {
+	if err := dag.AddEdge(dag.startNode.ID, "1"); err != nil {
 		t.Fatalf("failed to add edge from StartNode to '1': %v", err)
 	}
 	if err := dag.AddEdge("1", "2"); err != nil {
@@ -769,7 +769,7 @@ func TestSimple1Dag(t *testing.T) {
 	dag.SetContainerCmd(NoopCmd{})
 
 	// 엣지 추가: DAG 의 노드들 간에 부모/자식 관계 구성
-	if err := dag.AddEdge(dag.StartNode.ID, "1"); err != nil {
+	if err := dag.AddEdge(dag.startNode.ID, "1"); err != nil {
 		t.Fatalf("failed to add edge from StartNode to '1': %v", err)
 	}
 	if err := dag.AddEdge("1", "2"); err != nil {
@@ -849,7 +849,7 @@ func TestComplexDag(t *testing.T) {
 
 	// 엣지 추가
 	edges := []struct{ from, to string }{
-		{dag.StartNode.ID, "A"},
+		{dag.startNode.ID, "A"},
 		{"A", "B1"},
 		{"A", "B2"},
 		{"B1", "C"},
@@ -958,7 +958,7 @@ func TestComplexDagProgress(t *testing.T) {
 
 	// 엣지 추가
 	edges := []struct{ from, to string }{
-		{dag.StartNode.ID, "A"},
+		{dag.startNode.ID, "A"},
 		{"A", "B1"},
 		{"A", "B2"},
 		{"B1", "C"},
@@ -1108,7 +1108,7 @@ func generateDAG(numNodes int, edgeProb float64) *Dag {
 
 				// 엣지 생성 및 등록
 				edge := &Edge{parentID: parentID, childID: childID}
-				dag.Edges = append(dag.Edges, edge)
+				dag.edges = append(dag.edges, edge)
 
 				// 부모/자식 관계 연결
 				dag.nodes[parentID].children = append(dag.nodes[parentID].children, dag.nodes[childID])
@@ -1165,10 +1165,10 @@ func verifyCopiedDag(original *Dag, newNodes map[string]*Node, newEdges []*Edge,
 	}
 
 	// (3) 간선 검증
-	if len(newEdges) != len(original.Edges) {
-		errs = append(errs, fmt.Sprintf("[%s] expected %d edges, got %d", methodName, len(original.Edges), len(newEdges)))
+	if len(newEdges) != len(original.edges) {
+		errs = append(errs, fmt.Sprintf("[%s] expected %d edges, got %d", methodName, len(original.edges), len(newEdges)))
 	}
-	for i, origEdge := range original.Edges {
+	for i, origEdge := range original.edges {
 		newEdge := newEdges[i]
 		if newEdge.parentID != origEdge.parentID || newEdge.childID != origEdge.childID {
 			errs = append(errs, fmt.Sprintf("[%s] edge %d: expected parent %s->child %s, got parent %s->child %s",
@@ -2033,8 +2033,7 @@ func TestNode_SetRunner(t *testing.T) {
 }
 
 // TestInitDagWithOptions verifies that InitDagWithOptions applies options and
-// returns a fully initialized DAG ready for AddEdge, exercising the
-// nolint:unused helper.
+// returns a fully initialized DAG ready for AddEdge.
 func TestInitDagWithOptions(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	Log.SetOutput(io.Discard)
@@ -2046,7 +2045,7 @@ func TestInitDagWithOptions(t *testing.T) {
 	if !d.bTimeout {
 		t.Error("expected bTimeout=true after WithTimeout option")
 	}
-	if d.StartNode == nil {
+	if d.startNode == nil {
 		t.Error("expected StartNode to be non-nil after InitDagWithOptions")
 	}
 }
@@ -2211,7 +2210,7 @@ func TestStart_ClosedChannel(t *testing.T) {
 	dag.ConnectRunner()
 
 	// Close the StartNode's trigger channel so Send will fail.
-	dag.StartNode.parentVertex[0].Close() //nolint:errcheck
+	dag.startNode.parentVertex[0].Close() //nolint:errcheck
 
 	result := dag.Start()
 	if result {
@@ -2539,18 +2538,18 @@ func TestCopyDag_WithStartAndEndNode(t *testing.T) {
 	if copied == nil {
 		t.Fatal("CopyDag returned nil")
 	}
-	if copied.StartNode == nil {
-		t.Error("copied.StartNode is nil — case StartNode branch not exercised")
+	if copied.startNode == nil {
+		t.Error("copied.startNode is nil — case StartNode branch not exercised")
 	}
-	if copied.EndNode == nil {
-		t.Error("copied.EndNode is nil — case EndNode branch not exercised")
+	if copied.endNode == nil {
+		t.Error("copied.endNode is nil — case EndNode branch not exercised")
 	}
 	// Verify the IDs match expected sentinels.
-	if copied.StartNode != nil && copied.StartNode.ID != StartNode {
-		t.Errorf("copied StartNode ID = %q, want %q", copied.StartNode.ID, StartNode)
+	if copied.startNode != nil && copied.startNode.ID != StartNode {
+		t.Errorf("copied StartNode ID = %q, want %q", copied.startNode.ID, StartNode)
 	}
-	if copied.EndNode != nil && copied.EndNode.ID != EndNode {
-		t.Errorf("copied EndNode ID = %q, want %q", copied.EndNode.ID, EndNode)
+	if copied.endNode != nil && copied.endNode.ID != EndNode {
+		t.Errorf("copied EndNode ID = %q, want %q", copied.endNode.ID, EndNode)
 	}
 
 	original.Errors.Close() //nolint:errcheck
@@ -2725,7 +2724,7 @@ func TestAddEndNode_ExistingEdge(t *testing.T) {
 	dag := NewDag()
 	from := &Node{ID: "aene-from"}
 	to := &Node{ID: "aene-to"}
-	// Register nodes in dag so createEdge can append to dag.Edges.
+	// Register nodes in dag so createEdge can append to dag.edges.
 	dag.nodes["aene-from"] = from
 	dag.nodes["aene-to"] = to
 
@@ -3047,5 +3046,250 @@ func TestCollectErrors_DrainOnChannelClose(t *testing.T) {
 	// Must return well before the 5 s drain timeout — channel close is immediate.
 	if elapsed > time.Second {
 		t.Errorf("collectErrors took too long after channel close: %v", elapsed)
+	}
+}
+
+// ── P0 regression tests ───────────────────────────────────────────────────────
+
+// TestWorkerPool_SmallCap_NoDeadlock verifies that a WorkerPoolSize smaller
+// than the node count does not deadlock.  Previously the worker pool owned
+// preFlight (dependency wait) as well as inFlight, so children could exhaust
+// all slots while waiting for parents, causing the whole DAG to hang.
+func TestWorkerPool_SmallCap_NoDeadlock(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	// chain: start → A → B → C → end  with only 1 execution slot
+	dag := NewDagWithOptions(WithWorkerPool(1))
+	var err error
+	dag, err = dag.StartDag()
+	if err != nil {
+		t.Fatalf("StartDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.AddEdge("A", "B"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.AddEdge("B", "C"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+	if !dag.Wait(ctx) {
+		t.Fatal("DAG deadlocked or failed with WorkerPoolSize=1")
+	}
+}
+
+// TestWorkerPool_FanOut_SmallCap_NoDeadlock verifies the same property for a
+// fan-out topology (start → N parallel nodes → end) which is the worst case:
+// all child goroutines could previously grab slots before start_node ran.
+func TestWorkerPool_FanOut_SmallCap_NoDeadlock(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	const nodeCount = 8
+	dag := NewDagWithOptions(WithWorkerPool(2)) // 2 slots, 8+2 nodes total
+	var err error
+	dag, err = dag.StartDag()
+	if err != nil {
+		t.Fatalf("StartDag: %v", err)
+	}
+	for i := range nodeCount {
+		id := fmt.Sprintf("n%d", i)
+		if err := dag.AddEdge(StartNode, id); err != nil {
+			t.Fatalf("AddEdge: %v", err)
+		}
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+	if !dag.Wait(ctx) {
+		t.Fatalf("DAG deadlocked or failed with WorkerPoolSize=2, nodeCount=%d", nodeCount)
+	}
+}
+
+// TestGetReady_DoubleCall_NoExtraGoroutines verifies that a second GetReady
+// call returns false immediately and does not launch additional goroutines.
+func TestGetReady_DoubleCall_NoExtraGoroutines(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("first GetReady failed")
+	}
+	if dag.GetReady(ctx) {
+		t.Error("second GetReady should return false")
+	}
+	// Complete the DAG so goroutines exit cleanly (goleak requires no leaks).
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+	dag.Wait(ctx) //nolint:errcheck
+}
+
+// TestFinishDag_CycleLeaksNoEndNode verifies that when FinishDag detects a
+// cycle it leaves the DAG structure unchanged — in particular, EndNode must
+// not be added to dag.nodes.
+func TestFinishDag_CycleLeaksNoEndNode(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+
+	// Build: start → A → B, then manually add back-edge B → A to create a cycle.
+	// AddEdge handles the forward edges; we inject the back-edge directly to
+	// bypass the self-loop guard while still satisfying the isolated-node check.
+	if addErr := dag.AddEdge(StartNode, "A"); addErr != nil {
+		t.Fatalf("AddEdge: %v", addErr)
+	}
+	if addErr := dag.AddEdge("A", "B"); addErr != nil {
+		t.Fatalf("AddEdge: %v", addErr)
+	}
+	// Back-edge B → A (creates cycle).  No SafeChannel needed; detectCycle only
+	// inspects node.children.
+	dag.nodes["B"].children = append(dag.nodes["B"].children, dag.nodes["A"])
+	dag.nodes["A"].parent = append(dag.nodes["A"].parent, dag.nodes["B"])
+
+	nodesBefore := len(dag.nodes)
+	endNodeBefore := dag.endNode
+
+	err = dag.FinishDag()
+	if err == nil {
+		t.Fatal("expected FinishDag to return an error for a cyclic graph")
+	}
+	if !errors.Is(err, ErrCycleDetected) {
+		t.Errorf("expected ErrCycleDetected, got: %v", err)
+	}
+
+	// DAG must not have grown — EndNode must not have been added.
+	if len(dag.nodes) != nodesBefore {
+		t.Errorf("dag.nodes grew from %d to %d after failed FinishDag", nodesBefore, len(dag.nodes))
+	}
+	if dag.endNode != endNodeBefore {
+		t.Error("dag.endNode was set despite FinishDag failure")
+	}
+	if dag.validated {
+		t.Error("dag.validated must be false after failed FinishDag")
+	}
+}
+
+// TestCreateNode_ReservedID verifies that CreateNode and CreateNodeWithTimeOut
+// reject the reserved synthetic node IDs (StartNode / EndNode).
+func TestCreateNode_ReservedID(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag := NewDag()
+	for _, reserved := range []string{StartNode, EndNode} {
+		if n := dag.CreateNode(reserved); n != nil {
+			t.Errorf("CreateNode(%q) should return nil for reserved ID, got non-nil", reserved)
+		}
+		if n := dag.CreateNodeWithTimeOut(reserved, false, 0); n != nil {
+			t.Errorf("CreateNodeWithTimeOut(%q) should return nil for reserved ID, got non-nil", reserved)
+		}
+	}
+}
+
+// TestAddEdge_ReservedEndNodeTarget verifies that AddEdge rejects an implicit
+// attempt to create end_node via the to-node argument before FinishDag.
+func TestAddEdge_ReservedEndNodeTarget(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	// Attempting to wire directly to end_node before FinishDag is called must
+	// fail: end_node doesn't exist yet and is a reserved ID.
+	if err := dag.AddEdge(StartNode, EndNode); err == nil {
+		t.Error("AddEdge(StartNode, EndNode) should return error for reserved target")
+	}
+	dag.Errors.Close() //nolint:errcheck
+}
+
+// TestSafeChannel_SendBlocking_UnblocksOnClose verifies that SendBlocking
+// returns false when Close() is called concurrently on a full channel, rather
+// than deadlocking.
+func TestSafeChannel_SendBlocking_UnblocksOnClose(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	// Buffer of 1: the first send fills it; the second send blocks.
+	sc := NewSafeChannelGen[int](1)
+	sc.Send(42) //nolint:errcheck // fills the buffer
+
+	done := make(chan bool, 1)
+	go func() {
+		// This send must block until Close() signals sc.done.
+		result := sc.SendBlocking(context.Background(), 99)
+		done <- result
+	}()
+
+	// Give the goroutine time to enter the blocking select.
+	time.Sleep(10 * time.Millisecond)
+
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case result := <-done:
+		if result {
+			t.Error("SendBlocking should return false after channel is closed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SendBlocking deadlocked: did not unblock after Close()")
 	}
 }

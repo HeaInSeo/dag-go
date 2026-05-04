@@ -143,13 +143,14 @@ type Dag struct {
 	// ID is the unique identifier assigned at creation time (UUID v4).
 	ID string
 
-	// Edges is the ordered list of directed edges in the graph.
-	// Mutate only through AddEdge / AddEdgeIfNodesExist before FinishDag.
-	Edges []*Edge
+	// edges is the ordered list of directed edges in the graph.
+	// External callers must use the Edges() method for read access.
+	// Mutations must go through AddEdge / AddEdgeIfNodesExist before FinishDag.
+	edges []*Edge
 
 	nodes     map[string]*Node
-	StartNode *Node // synthetic entry node created by StartDag
-	EndNode   *Node // synthetic exit node created by FinishDag
+	startNode *Node // synthetic entry node created by StartDag
+	endNode   *Node // synthetic exit node created by FinishDag
 
 	validated bool // true after FinishDag succeeds
 
@@ -202,7 +203,13 @@ type Dag struct {
 	// Config holds the tunable parameters active for this DAG instance.
 	Config DagConfig
 
-	workerPool     *DagWorkerPool
+	// execSem caps the number of nodes that may run inFlight (RunE) concurrently.
+	// It is a buffered channel with capacity == WorkerPoolSize, initialised by
+	// GetReady.  preFlight (dependency wait) never acquires a slot, so a small
+	// cap cannot deadlock the graph.
+	execSem chan struct{}
+	// nodeWg tracks every goroutine launched by GetReady; Wait drains it.
+	nodeWg         sync.WaitGroup
 	nodeCount      int64        // total user-defined node count (atomic)
 	completedCount int64        // nodes that called MarkCompleted (atomic)
 	droppedErrors  int64        // errors dropped by reportError (atomic)
@@ -250,14 +257,41 @@ func NewDag() *Dag {
 	return NewDagWithConfig(DefaultDagConfig())
 }
 
+// normalizeDagConfig clamps any out-of-range DagConfig fields to safe minimums.
+// It is called by NewDagWithConfig and by WithWorkerPool / WithChannelBuffers so
+// that the DAG always starts with a coherent configuration regardless of caller
+// input.
+func normalizeDagConfig(cfg DagConfig) DagConfig {
+	if cfg.MinChannelBuffer < 1 {
+		cfg.MinChannelBuffer = 1
+	}
+	if cfg.MaxChannelBuffer < 1 {
+		cfg.MaxChannelBuffer = 1
+	}
+	if cfg.StatusBuffer < 1 {
+		cfg.StatusBuffer = 1
+	}
+	if cfg.WorkerPoolSize < 1 {
+		cfg.WorkerPoolSize = 1
+	}
+	if cfg.ErrorDrainTimeout <= 0 {
+		cfg.ErrorDrainTimeout = 5 * time.Second
+	}
+	// ExpectedNodeCount and DefaultTimeout may legitimately be 0; no clamping.
+	return cfg
+}
+
 // NewDagWithConfig returns a new Dag using the supplied DagConfig.
 // Prefer InitDag for the common case; use this constructor when you need to
 // customise buffer sizes, timeouts, or the worker pool size before adding nodes.
+// Invalid config values (zero or negative buffers / pool size) are clamped to
+// safe minimums by normalizeDagConfig.
 func NewDagWithConfig(config DagConfig) *Dag {
+	config = normalizeDagConfig(config)
 	nodeCapacity := config.ExpectedNodeCount
 	return &Dag{
 		nodes:       make(map[string]*Node, nodeCapacity),
-		Edges:       make([]*Edge, 0, nodeCapacity),
+		edges:       make([]*Edge, 0, nodeCapacity),
 		ID:          uuid.NewString(),
 		NodesResult: NewSafeChannelGen[*printStatus](config.MaxChannelBuffer),
 		Config:      config,
@@ -268,13 +302,15 @@ func NewDagWithConfig(config DagConfig) *Dag {
 // NewDagWithOptions returns a new Dag with DefaultDagConfig, then applies each
 // DagOption in order.  Functional options (e.g. WithTimeout, WithWorkerPool)
 // are applied after default values, so later options can override earlier ones.
+// The final config is normalised after all options are applied.
 func NewDagWithOptions(options ...DagOption) *Dag {
 	dag := NewDagWithConfig(DefaultDagConfig())
 
-	// 옵션 적용
 	for _, option := range options {
 		option(dag)
 	}
+	// Re-normalise after options may have set invalid values (e.g. WithWorkerPool(0)).
+	dag.Config = normalizeDagConfig(dag.Config)
 
 	return dag
 }
@@ -528,14 +564,19 @@ func (dag *Dag) StartDag() (*Dag, error) {
 		return err
 	}
 
-	// StartNode 생성 및 에러 처리
-	if dag.StartNode = dag.createNode(StartNode); dag.StartNode == nil {
+	// Reject double-call: overwriting startNode with nil would crash Start().
+	if dag.startNode != nil {
+		return nil, logErr(fmt.Errorf("StartDag already called"))
+	}
+	node := dag.createNode(StartNode)
+	if node == nil {
 		return nil, logErr(fmt.Errorf("failed to create start node"))
 	}
+	dag.startNode = node
 
 	// 새 제네릭 SafeChannel 생성 후, 시작 노드의 parentVertex에 추가
 	safeChan := NewSafeChannelGen[runningStatus](dag.Config.MinChannelBuffer)
-	dag.StartNode.parentVertex = append(dag.StartNode.parentVertex, safeChan)
+	dag.startNode.parentVertex = append(dag.startNode.parentVertex, safeChan)
 	return dag, nil
 }
 
@@ -595,7 +636,7 @@ func (dag *Dag) createEdge(parentID, childID string) (*Edge, createEdgeErrorType
 	}
 
 	// 이미 존재하는 엣지 확인
-	if edgeExists(dag.Edges, parentID, childID) {
+	if edgeExists(dag.edges, parentID, childID) {
 		return nil, Exist
 	}
 
@@ -605,7 +646,7 @@ func (dag *Dag) createEdge(parentID, childID string) (*Edge, createEdgeErrorType
 		safeVertex: NewSafeChannelGen[runningStatus](dag.Config.MinChannelBuffer), // 제네릭 SafeChannel 을 사용하여 안전한 채널 생성
 	}
 
-	dag.Edges = append(dag.Edges, edge)
+	dag.edges = append(dag.edges, edge)
 	return edge, Create
 }
 
@@ -613,7 +654,7 @@ func (dag *Dag) createEdge(parentID, childID string) (*Edge, createEdgeErrorType
 //
 //nolint:gocognit // iterates over three independent channel slices; each branch is simple but overall count is high
 func (dag *Dag) closeChannels() {
-	for _, edge := range dag.Edges {
+	for _, edge := range dag.edges {
 		if edge.safeVertex != nil {
 			if err := edge.safeVertex.Close(); err != nil {
 				Log.Warnf("Failed to close edge channel [%s -> %s]: %v", edge.parentID, edge.childID, err)
@@ -654,7 +695,7 @@ func (dag *Dag) closeChannels() {
 // getSafeVertex returns the SafeChannel for the edge between parentID and childID,
 // or nil if no such edge exists.
 func (dag *Dag) getSafeVertex(parentID, childID string) *SafeChannel[runningStatus] {
-	for _, v := range dag.Edges {
+	for _, v := range dag.edges {
 		if v.parentID == parentID && v.childID == childID {
 			return v.safeVertex
 		}
@@ -686,18 +727,69 @@ func (dag *Dag) DroppedErrors() int64 {
 	return atomic.LoadInt64(&dag.droppedErrors)
 }
 
+// Edges returns a shallow copy of the DAG's edge list.  The slice is safe to
+// read but mutations to the returned slice do not affect the DAG.
+func (dag *Dag) Edges() []*Edge {
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+	cp := make([]*Edge, len(dag.edges))
+	copy(cp, dag.edges)
+	return cp
+}
+
+// StartNodeID returns the ID of the synthetic entry node ("start_node"), or an
+// empty string if StartDag has not been called yet.
+func (dag *Dag) StartNodeID() string {
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+	if dag.startNode == nil {
+		return ""
+	}
+	return dag.startNode.ID
+}
+
+// EndNodeID returns the ID of the synthetic exit node ("end_node"), or an empty
+// string if FinishDag has not been called yet.
+func (dag *Dag) EndNodeID() string {
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+	if dag.endNode == nil {
+		return ""
+	}
+	return dag.endNode.ID
+}
+
 // CreateNode creates a pointer to a new node with thread safety.
+// Returns nil if the DAG has already been finalized by FinishDag, or if id is
+// a reserved synthetic node name (StartNode / EndNode).
 func (dag *Dag) CreateNode(id string) *Node {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
 
+	if dag.validated {
+		return nil
+	}
+	if id == StartNode || id == EndNode {
+		Log.Warnf("CreateNode: id %q is reserved and cannot be created by the caller", id)
+		return nil
+	}
 	return dag.createNode(id)
 }
 
 // CreateNodeWithTimeOut creates a node that applies a per-node timeout when bTimeOut is true.
+// Returns nil if the DAG has already been finalized by FinishDag, or if id is
+// a reserved synthetic node name (StartNode / EndNode).
 func (dag *Dag) CreateNodeWithTimeOut(id string, bTimeOut bool, ti time.Duration) *Node {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
+
+	if dag.validated {
+		return nil
+	}
+	if id == StartNode || id == EndNode {
+		Log.Warnf("CreateNodeWithTimeOut: id %q is reserved and cannot be created by the caller", id)
+		return nil
+	}
 	if bTimeOut {
 		return dag.createNodeWithTimeOut(id, ti)
 	}
@@ -761,6 +853,7 @@ func (dag *Dag) createNodeWithTimeOut(id string, ti time.Duration) *Node {
 }
 
 // AddEdge adds an edge between two nodes with improved error handling.
+// Returns an error if the DAG has already been finalized by FinishDag.
 func (dag *Dag) AddEdge(from, to string) error {
 	// 에러 로그를 기록하고 반환하는 클로저 함수
 	logErr := func(err error) error {
@@ -783,10 +876,19 @@ func (dag *Dag) AddEdge(from, to string) error {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
 
+	if dag.validated {
+		return logErr(fmt.Errorf("DAG is already finalized: AddEdge is not allowed after FinishDag"))
+	}
+
 	// 노드를 가져오거나 생성하는 클로저 함수
 	getOrCreateNode := func(id string) (*Node, error) {
 		if node := dag.nodes[id]; node != nil {
 			return node, nil
+		}
+		// Reject implicit creation of synthetic reserved nodes.  start_node is
+		// created only by StartDag; end_node only by FinishDag.
+		if id == EndNode {
+			return nil, logErr(fmt.Errorf("%s: reserved node ID cannot be used as an edge target before FinishDag", id))
 		}
 		node := dag.createNode(id)
 		if node == nil {
@@ -844,6 +946,10 @@ func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
 
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
+
+	if dag.validated {
+		return logErr(fmt.Errorf("DAG is already finalized: AddEdgeIfNodesExist is not allowed after FinishDag"))
+	}
 
 	// 노드를 가져오는 클로저 함수: 노드가 없으면 에러 리턴
 	getNode := func(id string) (*Node, error) {
@@ -947,22 +1053,15 @@ func (dag *Dag) FinishDag() error {
 		nodes = append(nodes, n)
 	}
 
-	// 종료 노드 생성 및 초기화
-	dag.EndNode = dag.createNode(EndNode)
-	if dag.EndNode == nil {
-		return logErr(fmt.Errorf("failed to create end node"))
-	}
-	// TODO(endnode-cleanup): EndNode is unconditionally marked succeeded.
-	// If a future runner type needs to release resources at DAG completion,
-	// a cleanup hook should be invoked here before SetSucceed.
-	dag.EndNode.SetSucceed(true)
+	// ── Phase 1: validate only — no graph mutation ────────────────────────────
+	// All checks that can return an error run before any structural changes so
+	// that a failed FinishDag leaves the DAG in exactly the state it was in
+	// before the call.
 
-	// 각 노드에 대해 검증 및 종료 노드로의 연결 작업 수행
 	for _, n := range nodes {
 		// 부모와 자식이 없는 고립된 노드가 있는 경우
 		if len(n.children) == 0 && len(n.parent) == 0 {
 			if len(nodes) == 1 {
-				// 노드가 단 하나일 경우, 반드시 시작 노드여야 함.
 				if n.ID != StartNode {
 					return logErr(fmt.Errorf("invalid node: only node is not the start node"))
 				}
@@ -970,19 +1069,33 @@ func (dag *Dag) FinishDag() error {
 				return logErr(fmt.Errorf("node '%s' has no parent and no children", n.ID))
 			}
 		}
+	}
 
-		// 종료 노드가 아니면서 자식이 없는 경우, 종료 노드와 연결
+	// 사이클 검사: EndNode 추가 전에 실행하여 실패 시 그래프를 변경하지 않는다.
+	// FinishDag 는 이미 dag.mu.Lock() 을 보유하고 있으므로 내부 함수를 직접 호출.
+	if detectCycle(dag) {
+		return logErr(fmt.Errorf("FinishDag: %w", ErrCycleDetected))
+	}
+
+	// ── Phase 2: commit — graph mutation only after all checks pass ───────────
+
+	// 종료 노드 생성 및 초기화
+	dag.endNode = dag.createNode(EndNode)
+	if dag.endNode == nil {
+		return logErr(fmt.Errorf("failed to create end node"))
+	}
+	// TODO(endnode-cleanup): EndNode is unconditionally marked succeeded.
+	// If a future runner type needs to release resources at DAG completion,
+	// a cleanup hook should be invoked here before SetSucceed.
+	dag.endNode.SetSucceed(true)
+
+	// 자식이 없는 노드를 종료 노드와 연결
+	for _, n := range nodes {
 		if n.ID != EndNode && len(n.children) == 0 {
-			if err := dag.addEndNode(n, dag.EndNode); err != nil {
+			if err := dag.addEndNode(n, dag.endNode); err != nil {
 				return logErr(fmt.Errorf("addEndNode failed for node '%s': %w", n.ID, err))
 			}
 		}
-	}
-
-	// 사이클 검사: FinishDag 는 이미 dag.mu.Lock() 을 보유하고 있으므로
-	// RLock 을 추가로 획득하는 DetectCycle 대신 내부 함수 detectCycle 을 직접 호출.
-	if detectCycle(dag) {
-		return logErr(fmt.Errorf("FinishDag: %w", ErrCycleDetected))
 	}
 
 	// 검증 완료 플래그 설정
@@ -1016,7 +1129,7 @@ func (dag *Dag) Reset() {
 	atomic.StoreInt64(&dag.droppedErrors, 0)
 
 	// Reset every node to Pending and clear its per-execution state.
-	// childrenVertex / parentVertex are cleared here and rebuilt from dag.Edges
+	// childrenVertex / parentVertex are cleared here and rebuilt from dag.edges
 	// below so they point to the newly created SafeChannels.
 	for _, n := range dag.nodes {
 		n.mu.Lock()
@@ -1030,18 +1143,18 @@ func (dag *Dag) Reset() {
 
 	// Re-attach the start-node trigger channel.  This channel is not backed by
 	// an Edge entry; Start() writes to parentVertex[0] to fire the first node.
-	if dag.StartNode != nil {
-		dag.StartNode.mu.Lock()
-		dag.StartNode.parentVertex = []*SafeChannel[runningStatus]{
+	if dag.startNode != nil {
+		dag.startNode.mu.Lock()
+		dag.startNode.parentVertex = []*SafeChannel[runningStatus]{
 			NewSafeChannelGen[runningStatus](dag.Config.MinChannelBuffer),
 		}
-		dag.StartNode.mu.Unlock()
+		dag.startNode.mu.Unlock()
 	}
 
 	// Recreate each edge's channel and rewire it into the owning nodes' vertex
 	// slices.  The lock order (dag.mu → n.mu) is consistent with the rest of
 	// the codebase and prevents deadlocks.
-	for _, edge := range dag.Edges {
+	for _, edge := range dag.edges {
 		edge.safeVertex = NewSafeChannelGen[runningStatus](dag.Config.MinChannelBuffer)
 		if parent := dag.nodes[edge.parentID]; parent != nil {
 			parent.mu.Lock()
@@ -1060,10 +1173,11 @@ func (dag *Dag) Reset() {
 	dag.NodesResult = NewSafeChannelGen[*printStatus](dag.Config.MaxChannelBuffer)
 	dag.Errors = NewSafeChannelGen[error](dag.Config.MaxChannelBuffer)
 
-	// Clear per-run state so GetReady and the worker pool are re-initialised
-	// fresh on the next call.
+	// Clear per-run state so GetReady re-initialises fresh on the next call.
 	dag.nodeResult = nil
-	dag.workerPool = nil
+	dag.execSem = nil
+	// nodeWg is a value type; its zero value is ready to use after all previous
+	// goroutines have exited (guaranteed by Wait's defer nodeWg.Wait()).
 	dag.errLogs = nil
 }
 
@@ -1088,8 +1202,10 @@ func (dag *Dag) ConnectRunner() bool {
 	return true
 }
 
-// GetReady initialises the worker pool and submits a goroutine task for every
-// node.  The worker pool size is min(nodeCount, DagConfig.WorkerPoolSize).
+// GetReady initialises the execution semaphore and launches one goroutine per
+// node.  Each goroutine runs preFlight (dependency wait) without holding an
+// execution slot; the slot is acquired inside connectRunner just before inFlight
+// (RunE) so that a small WorkerPoolSize cannot deadlock the graph.
 //
 // Call GetReady after ConnectRunner and before Start.  ctx is forwarded to each
 // node's runner function; cancel it to abort the entire execution.
@@ -1097,6 +1213,10 @@ func (dag *Dag) ConnectRunner() bool {
 // Returns false if the DAG has no nodes or GetReady has already been called
 // (i.e. nodeResult is already set).
 func (dag *Dag) GetReady(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
 
@@ -1105,28 +1225,27 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 		return false
 	}
 
-	// TODO 이거 생각해보자. -> 워커 풀.
-	// 워커 풀 초기화
-	maxWorkers := minInt(n, dag.Config.WorkerPoolSize)
-	dag.workerPool = NewDagWorkerPool(maxWorkers)
-
-	// 각 노드별로 SafeChannel[*printStatus]를 생성하여 safeChs 슬라이스에 저장한다.
-	safeChs := make([]*SafeChannel[*printStatus], 0, n)
-
-	for _, v := range dag.nodes {
-		// Per-node result channel: collects the three phase statuses
-		// (preFlight / inFlight / postFlight) that fanIn forwards to NodesResult.
-		sc := NewSafeChannelGen[*printStatus](dag.Config.MinChannelBuffer)
-		safeChs = append(safeChs, sc)
-
-		// Submit a zero-allocation nodeTask instead of a closure so the worker
-		// goroutine calls node.runner directly without a heap-allocated func().
-		dag.workerPool.Submit(nodeTask{node: v, sc: sc, ctx: ctx})
-	}
-
+	// Guard against double-call: check before launching any goroutines so that
+	// a second call is a no-op and does not spawn duplicate goroutines.
 	if dag.nodeResult != nil {
 		return false
 	}
+
+	// Semaphore capacity = WorkerPoolSize caps concurrent inFlight executions.
+	dag.execSem = make(chan struct{}, dag.Config.WorkerPoolSize)
+
+	safeChs := make([]*SafeChannel[*printStatus], 0, n)
+
+	for _, v := range dag.nodes {
+		sc := NewSafeChannelGen[*printStatus](dag.Config.MinChannelBuffer)
+		safeChs = append(safeChs, sc)
+		dag.nodeWg.Add(1)
+		go func(node *Node, sc *SafeChannel[*printStatus]) {
+			defer dag.nodeWg.Done()
+			node.runner(ctx, sc)
+		}(v, sc)
+	}
+
 	dag.nodeResult = safeChs
 	return true
 }
@@ -1138,18 +1257,22 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 // Call Start exactly once after GetReady.  Returns false if the trigger send
 // fails (e.g. channel full or closed, which should not happen in normal use).
 func (dag *Dag) Start() bool {
-	if len(dag.StartNode.parentVertex) != 1 {
+	// Guard against calling Start before GetReady or StartDag.
+	if dag.startNode == nil || dag.nodeResult == nil {
+		return false
+	}
+	if len(dag.startNode.parentVertex) != 1 {
 		return false
 	}
 
-	sc := dag.StartNode.parentVertex[0]
+	sc := dag.startNode.parentVertex[0]
 	if !sc.Send(Start) {
 		// Send 실패시 적절한 로그 출력 혹은 상태 변경 처리.
 		Log.Warnf("Failed to send Start status on safe channel for start node")
-		dag.StartNode.SetSucceed(false)
+		dag.startNode.SetSucceed(false)
 		return false
 	}
-	dag.StartNode.SetSucceed(true)
+	dag.startNode.SetSucceed(true)
 	return true
 }
 
@@ -1169,13 +1292,19 @@ func (dag *Dag) Start() bool {
 //
 //nolint:gocognit // fan-in select loop must handle merge result, node status stream, and context cancellation simultaneously
 func (dag *Dag) Wait(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	// Guard against calling Wait before GetReady (nodeResult not initialised).
+	if dag.nodeResult == nil {
+		return false
+	}
+
 	// DAG 종료 시 채널들을 안전하게 닫는다.
 	defer dag.closeChannels()
 
-	// 워커 풀 종료
-	if dag.workerPool != nil {
-		defer dag.workerPool.Close()
-	}
+	// Wait for all per-node goroutines to exit before returning.
+	defer dag.nodeWg.Wait()
 
 	// 컨텍스트에서 타임아웃 설정
 	var waitCtx context.Context
@@ -1309,7 +1438,7 @@ func DetectCycle(dag *Dag) bool {
 
 // connectRunner connects a runner function to a node.
 //
-//nolint:gocognit // three-phase flight state machine with execution-timeout resolution; splitting would obscure the node lifecycle
+//nolint:gocognit,gocyclo // three-phase flight + semaphore; splitting would obscure the node lifecycle
 func connectRunner(n *Node) {
 	n.runner = func(ctx context.Context, result *SafeChannel[*printStatus]) {
 		// sendResult delivers a copy of ps to the per-node result channel.
@@ -1354,6 +1483,27 @@ func connectRunner(n *Node) {
 		}
 		releasePrintStatus(ps)
 
+		// Acquire the execution semaphore slot.  Only inFlight (RunE) holds the
+		// slot; preFlight runs without it, so a WorkerPoolSize smaller than the
+		// node count can never cause a deadlock.
+		// The timeout context is built AFTER acquiring the slot so the budget
+		// measures actual RunE time, not semaphore wait time.
+		if pd := n.parentDag; pd != nil && pd.execSem != nil {
+			select {
+			case pd.execSem <- struct{}{}:
+				defer func() { <-pd.execSem }()
+			case <-ctx.Done():
+				semPs := newPrintStatus(InFlightFailed, n.ID)
+				sendResult(semPs)
+				if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
+					Log.Warnf("connectRunner: Running→Failed (semaphore ctx cancel) rejected for node %s (status=%v)", n.ID, n.GetStatus())
+				}
+				n.notifyChildren(ctx, Failed)
+				releasePrintStatus(semPs)
+				return
+			}
+		}
+
 		// Resolve execution context for inFlight.
 		// Timeout priority (highest first):
 		//   1. Node.Timeout  — when Timeout > 0 (explicit per-node override)
@@ -1362,11 +1512,17 @@ func connectRunner(n *Node) {
 		//
 		// DefaultTimeout == 0 means no implicit per-node execution timeout is
 		// applied; DAG-wide limits are enforced via the caller context.
+		// Snapshot Node.Timeout under the read lock to avoid a data race with
+		// callers that set Timeout before ConnectRunner (e.g. CreateNodeWithTimeOut).
+		n.mu.RLock()
+		nodeTimeout := n.Timeout
+		n.mu.RUnlock()
+
 		var execCtx context.Context
 		var execCancel context.CancelFunc
 		switch {
-		case n.Timeout > 0:
-			execCtx, execCancel = context.WithTimeout(ctx, n.Timeout)
+		case nodeTimeout > 0:
+			execCtx, execCancel = context.WithTimeout(ctx, nodeTimeout)
 		case n.parentDag != nil && n.parentDag.Config.DefaultTimeout > 0:
 			execCtx, execCancel = context.WithTimeout(ctx, n.parentDag.Config.DefaultTimeout)
 		default:
@@ -1470,29 +1626,33 @@ func minInt(a, b int) int {
 //
 // ToMermaid acquires a read-lock and is safe to call concurrently with
 // Progress() and other read-only observers.  It must be called after
-// FinishDag so that dag.Edges is complete; calling it before FinishDag will
+// FinishDag so that dag.edges is complete; calling it before FinishDag will
 // produce a diagram that is missing the edges to the synthetic end node.
 func (dag *Dag) ToMermaid() string {
 	dag.mu.RLock()
 	defer dag.mu.RUnlock()
 
+	// Build a collision-free ID map covering every node in the graph.
+	allIDs := make([]string, 0, len(dag.nodes))
+	for id := range dag.nodes {
+		allIDs = append(allIDs, id)
+	}
+	idMap := buildMermaidIDMap(allIDs)
+
 	var sb strings.Builder
 	sb.WriteString("graph TD\n")
 
 	// First pass — emit a labelled node definition for every node that appears
-	// in at least one edge.  Pre-sizing the map to the number of known nodes
-	// avoids rehash growth on graphs where every node participates in an edge.
+	// in at least one edge.
 	defined := make(map[string]bool, len(dag.nodes))
-	for _, edge := range dag.Edges {
-		dag.writeMermaidNode(&sb, edge.parentID, defined)
-		dag.writeMermaidNode(&sb, edge.childID, defined)
+	for _, edge := range dag.edges {
+		dag.writeMermaidNode(&sb, edge.parentID, defined, idMap)
+		dag.writeMermaidNode(&sb, edge.childID, defined, idMap)
 	}
 
-	// Second pass — emit directed edges.
-	for _, edge := range dag.Edges {
-		fmt.Fprintf(&sb, "    %s --> %s\n",
-			mermaidSafeID(edge.parentID),
-			mermaidSafeID(edge.childID))
+	// Second pass — emit directed edges using the collision-free IDs.
+	for _, edge := range dag.edges {
+		fmt.Fprintf(&sb, "    %s --> %s\n", idMap[edge.parentID], idMap[edge.childID])
 	}
 
 	return sb.String()
@@ -1502,16 +1662,15 @@ func (dag *Dag) ToMermaid() string {
 // node has already been defined (tracked via the defined map).
 // Synthetic nodes (start_node / end_node) use the stadium shape; all others
 // use the default rectangle.  Caller must hold dag.mu at least for reading.
-func (dag *Dag) writeMermaidNode(sb *strings.Builder, nodeID string, defined map[string]bool) {
+func (dag *Dag) writeMermaidNode(sb *strings.Builder, nodeID string, defined map[string]bool, idMap map[string]string) {
 	if defined[nodeID] {
 		return
 	}
 	defined[nodeID] = true
-	mID := mermaidSafeID(nodeID)
+	mID := idMap[nodeID]
 	switch nodeID {
 	case StartNode, EndNode:
-		// Stadium shape visually distinguishes synthetic infrastructure nodes.
-		fmt.Fprintf(sb, "    %s([\"%s\"])\n", mID, nodeID)
+		fmt.Fprintf(sb, "    %s([\"%s\"])\n", mID, mermaidEscapeLabel(nodeID))
 	default:
 		fmt.Fprintf(sb, "    %s[\"%s\"]\n", mID, mermaidNodeLabel(nodeID, dag.nodes[nodeID]))
 	}
@@ -1524,18 +1683,46 @@ func (dag *Dag) writeMermaidNode(sb *strings.Builder, nodeID string, defined map
 func mermaidNodeLabel(nodeID string, n *Node) string {
 	if n != nil {
 		if r := n.runnerLoad(); r != nil {
-			return fmt.Sprintf("%s\\n%T", nodeID, r)
+			return fmt.Sprintf("%s\\n%T", mermaidEscapeLabel(nodeID), r)
 		}
 	}
-	return nodeID
+	return mermaidEscapeLabel(nodeID)
 }
 
-// mermaidSafeID converts an arbitrary node ID to a Mermaid-safe identifier by
-// replacing any character that is not an ASCII letter, digit, or underscore
-// with an underscore.  This prevents syntax errors when node IDs contain
-// hyphens, spaces, dots, or other characters that would break the flowchart
-// parser.
-func mermaidSafeID(id string) string {
+// buildMermaidIDMap returns a map from each original node ID to a unique,
+// Mermaid-safe identifier.  IDs that would produce the same safe base are
+// disambiguated by appending a numeric suffix (_0, _1, …).
+func buildMermaidIDMap(ids []string) map[string]string {
+	// First pass: compute the naive safe ID for each original ID and count
+	// how many originals share each safe base.
+	bases := make(map[string]string, len(ids))  // original → base safe ID
+	baseCount := make(map[string]int, len(ids)) // base safe ID → occurrence count
+	for _, id := range ids {
+		b := mermaidSafeBase(id)
+		bases[id] = b
+		baseCount[b]++
+	}
+
+	// Second pass: assign final IDs, adding a counter suffix only for
+	// bases that are shared by more than one original.
+	result := make(map[string]string, len(ids))
+	counter := make(map[string]int, len(ids))
+	for _, id := range ids {
+		b := bases[id]
+		if baseCount[b] > 1 {
+			result[id] = fmt.Sprintf("%s_%d", b, counter[b])
+			counter[b]++
+		} else {
+			result[id] = b
+		}
+	}
+	return result
+}
+
+// mermaidSafeBase converts an arbitrary node ID to a Mermaid-safe base
+// identifier by replacing any character that is not an ASCII letter, digit,
+// or underscore with an underscore.
+func mermaidSafeBase(id string) string {
 	var b strings.Builder
 	b.Grow(len(id))
 	for _, c := range id {
@@ -1548,13 +1735,27 @@ func mermaidSafeID(id string) string {
 	return b.String()
 }
 
+// mermaidEscapeLabel escapes characters that would break the Mermaid quoted
+// label syntax: double-quotes become #quot; (the Mermaid HTML entity),
+// backslashes are doubled, and carriage-returns are stripped.
+// Embedded newlines are kept as the Mermaid literal "\n" sequence so the
+// renderer can display multi-line labels.
+func mermaidEscapeLabel(s string) string {
+	s = strings.ReplaceAll(s, "\\", "\\\\")
+	s = strings.ReplaceAll(s, "\"", "#quot;")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
+}
+
 // CopyDag creates a structural copy of original with a new ID.
 //
 // The copy preserves the graph topology (nodes, edges, parent/child relationships)
 // and all DagConfig values.  It owns independent channels (NodesResult, Errors,
 // edge safeVertices) so executing the copy cannot affect the original.
 //
-// Items NOT copied: workerPool, nodeResult, errLogs, and runnerResolver.
+// Items NOT copied: per-node runners (Node.runnerVal), execSem, nodeResult,
+// errLogs, and runnerResolver.  Per-node runners are intentionally excluded
+// because they are stateful closures tied to the original DAG's channels.
 // The caller must wire runners and call the standard lifecycle on the copy:
 //
 //	ConnectRunner → GetReady → Start → Wait
@@ -1582,16 +1783,16 @@ func CopyDag(original *Dag, newID string) *Dag {
 	// 노드와 간선 복사
 	newNodes, newEdges := copyDag(original)
 	copied.nodes = newNodes
-	copied.Edges = newEdges
+	copied.edges = newEdges
 
 	// 노드에 새 DAG 참조를 설정하고 시작/종료 노드 확인
 	for _, node := range newNodes {
 		node.parentDag = copied
 		switch node.ID {
 		case StartNode:
-			copied.StartNode = node
+			copied.startNode = node
 		case EndNode:
-			copied.EndNode = node
+			copied.endNode = node
 		}
 	}
 
@@ -1638,8 +1839,8 @@ func copyDag(original *Dag) (map[string]*Node, []*Edge) {
 	}
 
 	// 3. 간선(Edge) 복사: parentID, childID만 복사
-	newEdges := make([]*Edge, len(original.Edges))
-	for i, e := range original.Edges {
+	newEdges := make([]*Edge, len(original.edges))
+	for i, e := range original.edges {
 		newEdges[i] = &Edge{
 			parentID: e.parentID,
 			childID:  e.childID,

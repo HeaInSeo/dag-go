@@ -64,7 +64,7 @@ func RunHeavyDag() {
 	}
 
 	edges := []struct{ from, to string }{
-		{dag.StartNode.ID, "A"},
+		{dag_go.StartNode, "A"},
 		{"A", "B1"}, {"A", "B2"},
 		{"B1", "C"}, {"B2", "C"},
 		{"C", "D1"}, {"C", "D2"},

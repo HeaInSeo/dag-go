@@ -21,7 +21,7 @@ func BenchmarkCopyDag_Small(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		newNodes, newEdges := copyDag(dag)
-		if len(newNodes) == 0 || (len(dag.Edges) > 0 && len(newEdges) == 0) {
+		if len(newNodes) == 0 || (len(dag.edges) > 0 && len(newEdges) == 0) {
 			b.Fatal("copyDag failed")
 		}
 	}
@@ -37,7 +37,7 @@ func BenchmarkCopyDag_Medium(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		newNodes, newEdges := copyDag(dag)
-		if len(newNodes) == 0 || (len(dag.Edges) > 0 && len(newEdges) == 0) {
+		if len(newNodes) == 0 || (len(dag.edges) > 0 && len(newEdges) == 0) {
 			b.Fatal("copyDag failed")
 		}
 	}
@@ -53,7 +53,7 @@ func BenchmarkCopyDag_Large(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		newNodes, newEdges := copyDag(dag)
-		if len(newNodes) == 0 || (len(dag.Edges) > 0 && len(newEdges) == 0) {
+		if len(newNodes) == 0 || (len(dag.edges) > 0 && len(newEdges) == 0) {
 			b.Fatal("copyDag failed")
 		}
 	}

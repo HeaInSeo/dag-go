@@ -191,7 +191,16 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 
 	for k, sc := range n.parentVertex {
 		if sc == nil {
-			Log.Fatalf("preFlight: n.parentVertex[%d] is nil for node %s", k, n.ID)
+			// parentVertex must never be nil — this indicates a construction bug.
+			// Inject an error goroutine so the errgroup cancels egCtx, which
+			// causes any already-running goroutines to exit cleanly before
+			// eg.Wait() returns, preventing goroutine leaks.
+			Log.Errorf("preFlight: parentVertex[%d] is nil for node %s", k, n.ID)
+			nilIdx := k
+			eg.Go(func() error {
+				return fmt.Errorf("node %s: parentVertex[%d] is nil", n.ID, nilIdx)
+			})
+			break
 		}
 		eg.Go(func() error {
 			pprof.SetGoroutineLabels(pprof.WithLabels(egCtx,
@@ -248,6 +257,9 @@ func inFlight(ctx context.Context, n *Node) *printStatus {
 			n.SetSucceed(false)
 			nodeErr := &NodeError{NodeID: n.ID, Phase: "inflight", Err: err}
 			Log.Println(nodeErr.Error())
+			if n.parentDag != nil {
+				n.parentDag.reportError(nodeErr)
+			}
 		}
 	} else {
 		Log.Println("Skipping execution for node", n.ID, "due to previous failure")
