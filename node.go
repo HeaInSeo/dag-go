@@ -228,6 +228,9 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 	if err != nil {
 		nodeErr := &NodeError{NodeID: n.ID, Phase: "preflight", Err: err}
 		Log.Println(nodeErr.Error())
+		if n.parentDag != nil {
+			n.parentDag.reportError(nodeErr)
+		}
 	}
 
 	n.SetSucceed(false)

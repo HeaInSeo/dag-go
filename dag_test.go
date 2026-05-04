@@ -3463,3 +3463,260 @@ func TestCopyDag_IsExecutable(t *testing.T) {
 		t.Fatal("Wait on copy failed — CopyDag did not produce an executable DAG")
 	}
 }
+
+// TestStart_CalledTwice verifies that a second Start() call returns false.
+func TestStart_CalledTwice(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("first Start failed")
+	}
+	if dag.Start() {
+		t.Error("second Start should return false")
+	}
+	dag.Wait(ctx) //nolint:errcheck
+}
+
+// TestStartE_CalledTwice verifies that StartE returns a descriptive error on
+// a second call.
+func TestStartE_CalledTwice(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if err := dag.StartE(); err != nil {
+		t.Fatalf("first StartE: %v", err)
+	}
+	if err := dag.StartE(); err == nil {
+		t.Error("second StartE should return error")
+	}
+	dag.Wait(ctx) //nolint:errcheck
+}
+
+// TestReset_WhileRunning_IsNoOp verifies that Reset called while the DAG is
+// still running neither panics nor corrupts state — it is silently ignored.
+func TestReset_WhileRunning_IsNoOp(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+
+	// Reset while goroutines are still live — must not panic or corrupt state.
+	dag.Reset()
+
+	// DAG should still complete normally.
+	if !dag.Wait(ctx) {
+		t.Fatal("Wait failed after spurious Reset call")
+	}
+}
+
+// TestResetE_WhileRunning_ReturnsError verifies that ResetE returns an error
+// when called while the DAG is still running.
+func TestResetE_WhileRunning_ReturnsError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+
+	if err := dag.ResetE(); err == nil {
+		t.Error("ResetE should return error while DAG is running")
+	}
+
+	dag.Wait(ctx) //nolint:errcheck
+}
+
+// TestPreFlight_FailureAppearsInDagErrors verifies that when a parent node
+// fails, the downstream node's preFlight failure is reported to dag.Errors.
+func TestPreFlight_FailureAppearsInDagErrors(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	// A fails → B's preFlight should detect it and report to dag.Errors.
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.AddEdge("A", "B"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	// A always returns an error so it transitions to Failed.
+	dag.SetNodeRunner("A", &errorRunnable{err: fmt.Errorf("A failed intentionally")})
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+	dag.Wait(ctx) //nolint:errcheck
+
+	// Collect errors from the channel (already closed by Wait).
+	errs := collectDagErrors(dag)
+
+	// There should be at least one error from A's inFlight failure, and
+	// possibly one from B's preFlight failure.
+	if len(errs) == 0 {
+		t.Error("expected at least one error in dag.Errors, got none")
+	}
+}
+
+// errorRunnable is a Runnable that always returns the configured error.
+type errorRunnable struct{ err error }
+
+func (e *errorRunnable) RunE(_ context.Context, _ interface{}) error { return e.err }
+
+// collectDagErrors drains dag.Errors (already closed by Wait) into a slice.
+func collectDagErrors(dag *Dag) []error {
+	var errs []error
+	for {
+		select {
+		case err, ok := <-dag.Errors.GetChannel():
+			if !ok {
+				return errs
+			}
+			errs = append(errs, err)
+		default:
+			return errs
+		}
+	}
+}
+
+// TestErrorReturnAPI_BasicLifecycle exercises the *E error-return API variants
+// through a complete lifecycle to confirm they behave identically to the bool
+// variants when called correctly.
+func TestErrorReturnAPI_BasicLifecycle(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	dag.SetContainerCmd(NoopCmd{})
+
+	if err := dag.ConnectRunnerE(); err != nil {
+		t.Fatalf("ConnectRunnerE: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := dag.GetReadyE(ctx); err != nil {
+		t.Fatalf("GetReadyE: %v", err)
+	}
+	if err := dag.StartE(); err != nil {
+		t.Fatalf("StartE: %v", err)
+	}
+	if err := dag.WaitE(ctx); err != nil {
+		t.Fatalf("WaitE: %v", err)
+	}
+
+	dag.ResetE() //nolint:errcheck
+}

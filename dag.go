@@ -209,7 +209,17 @@ type Dag struct {
 	// cap cannot deadlock the graph.
 	execSem chan struct{}
 	// nodeWg tracks every goroutine launched by GetReady; Wait drains it.
-	nodeWg         sync.WaitGroup
+	nodeWg sync.WaitGroup
+
+	// started is set by StartE/Start to prevent the trigger signal from being
+	// sent more than once per run.  Reset clears it.
+	started atomic.Bool
+
+	// running is true while GetReady goroutines are live (from GetReadyE until
+	// the combined cleanup defer in Wait clears it).  Reset checks this flag so
+	// it cannot replace live channels underneath running goroutines.
+	running atomic.Bool
+
 	nodeCount      int64        // total user-defined node count (atomic)
 	completedCount int64        // nodes that called MarkCompleted (atomic)
 	droppedErrors  int64        // errors dropped by reportError (atomic)
@@ -1140,28 +1150,9 @@ func (dag *Dag) FinishDag() error {
 	return nil
 }
 
-// Reset reinitialises a completed DAG so it can be executed again without
-// rebuilding the graph from scratch.
-//
-// Reset MUST be called only after Wait returns.  Calling it while the DAG is
-// still running leads to undefined behaviour because Reset replaces channels
-// that active goroutines may be reading from or writing to.
-//
-// After Reset, follow the standard execution lifecycle:
-//
-//	dag.Reset()
-//	dag.ConnectRunner()
-//	dag.GetReady(ctx)
-//	dag.Start()
-//	dag.Wait(ctx)
-//
-// The graph topology (nodes, edges, Config, ContainerCmd, runners) is preserved;
-// only execution state is reset.
-func (dag *Dag) Reset() {
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
-
-	// Reset per-run counters to zero.
+// reset is the internal implementation shared by Reset and ResetE.
+// Caller must hold dag.mu.Lock() and must have verified dag.running == false.
+func (dag *Dag) reset() {
 	atomic.StoreInt64(&dag.completedCount, 0)
 	atomic.StoreInt64(&dag.droppedErrors, 0)
 
@@ -1179,7 +1170,7 @@ func (dag *Dag) Reset() {
 	}
 
 	// Re-attach the start-node trigger channel.  This channel is not backed by
-	// an Edge entry; Start() writes to parentVertex[0] to fire the first node.
+	// an Edge entry; StartE() writes to parentVertex[0] to fire the first node.
 	if dag.startNode != nil {
 		dag.startNode.mu.Lock()
 		dag.startNode.parentVertex = []*SafeChannel[runningStatus]{
@@ -1216,44 +1207,93 @@ func (dag *Dag) Reset() {
 	// nodeWg is a value type; its zero value is ready to use after all previous
 	// goroutines have exited (guaranteed by Wait's defer nodeWg.Wait()).
 	dag.errLogs = nil
+
+	// Clear the one-per-run atomic flags so the next run can proceed.
+	dag.started.Store(false)
 }
 
-// ConnectRunner attaches a runner closure (the three-phase preFlight / inFlight /
-// postFlight state machine) to every node.
+// Reset reinitialises a completed DAG so it can be executed again without
+// rebuilding the graph from scratch.
 //
-// Call ConnectRunner after FinishDag and before GetReady.  After Reset, call it
-// again so the closures reference the freshly created channels.
+// Reset MUST be called only after Wait returns.  Calling it while the DAG is
+// still running is a no-op (the call is logged and returns immediately) to
+// prevent live goroutines from racing against freshly created channels.
+// Use ResetE if you need an error return instead of a silent guard.
 //
-// Returns false if the DAG has no nodes.
-func (dag *Dag) ConnectRunner() bool {
+// After Reset, follow the standard execution lifecycle:
+//
+//	dag.Reset()
+//	dag.ConnectRunner()
+//	dag.GetReady(ctx)
+//	dag.Start()
+//	dag.Wait(ctx)
+//
+// The graph topology (nodes, edges, Config, ContainerCmd, runners) is preserved;
+// only execution state is reset.
+func (dag *Dag) Reset() {
+	if dag.running.Load() {
+		Log.Error("Reset: called while DAG is running; ignoring — call Wait first")
+		return
+	}
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	dag.reset()
+}
+
+// ResetE is the error-returning variant of Reset.  It returns an error when
+// called while the DAG is still running (i.e. Wait has not yet returned).
+func (dag *Dag) ResetE() error {
+	if dag.running.Load() {
+		return fmt.Errorf("Reset: cannot reset while DAG is running; call Wait first")
+	}
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	dag.reset()
+	return nil
+}
+
+// ConnectRunnerE attaches the three-phase runner closure (preFlight / inFlight /
+// postFlight) to every node.  Call it after FinishDag and before GetReady; call
+// it again after Reset so the closures reference the freshly created channels.
+// Returns an error if the DAG has no nodes.
+func (dag *Dag) ConnectRunnerE() error {
 	dag.mu.RLock()
 	defer dag.mu.RUnlock()
 
-	n := len(dag.nodes)
-	if n < 1 {
-		return false
+	if len(dag.nodes) < 1 {
+		return fmt.Errorf("ConnectRunner: DAG has no nodes")
 	}
 	for _, v := range dag.nodes {
 		connectRunner(v)
 	}
+	return nil
+}
+
+// ConnectRunner is the bool-returning variant of ConnectRunnerE.
+// It returns false if the DAG has no nodes.
+func (dag *Dag) ConnectRunner() bool {
+	if err := dag.ConnectRunnerE(); err != nil {
+		Log.Warnf("%v", err)
+		return false
+	}
 	return true
 }
 
-// GetReady initialises the execution semaphore and launches one goroutine per
+// GetReadyE initialises the execution semaphore and launches one goroutine per
 // node.  Each goroutine runs preFlight (dependency wait) without holding an
 // execution slot; the slot is acquired inside connectRunner just before inFlight
 // (RunE) so that a small WorkerPoolSize cannot deadlock the graph.
 //
-// Prerequisites (returns false if violated):
+// Prerequisites (returns a descriptive error if violated):
 //   - ctx must be non-nil
 //   - FinishDag must have been called (dag.validated == true)
 //   - ConnectRunner must have been called (every node.runner must be non-nil)
-//   - GetReady must not have been called already (nodeResult == nil)
+//   - GetReady / GetReadyE must not have been called already
 //
 // ctx is forwarded to each node's runner; cancel it to abort the entire execution.
-func (dag *Dag) GetReady(ctx context.Context) bool {
+func (dag *Dag) GetReadyE(ctx context.Context) error {
 	if ctx == nil {
-		return false
+		return fmt.Errorf("GetReady: ctx is nil")
 	}
 
 	dag.mu.Lock()
@@ -1261,38 +1301,27 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 
 	n := len(dag.nodes)
 	if n < 1 {
-		return false
+		return fmt.Errorf("GetReady: DAG has no nodes")
 	}
-
-	// DAG must be finalized before execution can begin.
 	if !dag.validated {
-		Log.Warn("GetReady: FinishDag has not been called; call FinishDag before GetReady")
-		return false
+		return fmt.Errorf("GetReady: FinishDag has not been called")
 	}
 	if dag.startNode == nil || dag.endNode == nil {
-		Log.Warn("GetReady: start or end node is missing")
-		return false
+		return fmt.Errorf("GetReady: start or end node is missing")
 	}
-
-	// Guard against double-call: check before launching any goroutines so that
-	// a second call is a no-op and does not spawn duplicate goroutines.
+	// Guard against double-call: a second call must not spawn duplicate goroutines.
 	if dag.nodeResult != nil {
-		return false
+		return fmt.Errorf("GetReady: already called; call Reset before re-using the DAG")
 	}
-
 	// Every node must have a runner attached by ConnectRunner.  A nil runner
-	// causes a nil function call panic inside the goroutine; return false early
-	// so the caller gets a clear signal instead of an unrecoverable crash.
+	// causes a nil function call panic inside the goroutine.
 	for _, v := range dag.nodes {
 		if v.runner == nil {
-			Log.Errorf("GetReady: node %s has no runner; call ConnectRunner before GetReady", v.ID)
-			return false
+			return fmt.Errorf("GetReady: node %s has no runner; call ConnectRunner before GetReady", v.ID)
 		}
 	}
 
-	// Semaphore capacity = WorkerPoolSize caps concurrent inFlight executions.
 	dag.execSem = make(chan struct{}, dag.Config.WorkerPoolSize)
-
 	safeChs := make([]*SafeChannel[*printStatus], 0, n)
 
 	for _, v := range dag.nodes {
@@ -1306,32 +1335,54 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 	}
 
 	dag.nodeResult = safeChs
+	dag.running.Store(true)
+	return nil
+}
+
+// GetReady is the bool-returning variant of GetReadyE.
+func (dag *Dag) GetReady(ctx context.Context) bool {
+	if err := dag.GetReadyE(ctx); err != nil {
+		Log.Warnf("%v", err)
+		return false
+	}
 	return true
 }
 
-// Start fires the DAG by sending a trigger signal to the start node's input
+// StartE fires the DAG by sending a trigger signal to the start node's input
 // channel.  All node goroutines are already waiting (submitted by GetReady);
 // this single send unblocks the start node and cascades through the graph.
 //
-// Call Start exactly once after GetReady.  Returns false if the trigger send
-// fails (e.g. channel full or closed, which should not happen in normal use).
-func (dag *Dag) Start() bool {
-	// Guard against calling Start before GetReady or StartDag.
+// Call StartE exactly once after GetReady.  Returns an error if GetReady was
+// not called, if Start was already called for this run, or if the trigger
+// send fails unexpectedly.
+func (dag *Dag) StartE() error {
 	if dag.startNode == nil || dag.nodeResult == nil {
-		return false
+		return fmt.Errorf("Start: call GetReady before Start")
+	}
+	// Reject duplicate Start calls for the same run.
+	if !dag.started.CompareAndSwap(false, true) {
+		return fmt.Errorf("Start: already called; Start must be called exactly once per run")
 	}
 	if len(dag.startNode.parentVertex) != 1 {
-		return false
+		dag.started.Store(false) // rollback so Reset can clear it cleanly
+		return fmt.Errorf("Start: unexpected parentVertex length %d", len(dag.startNode.parentVertex))
 	}
-
 	sc := dag.startNode.parentVertex[0]
 	if !sc.Send(Start) {
-		// Send 실패시 적절한 로그 출력 혹은 상태 변경 처리.
-		Log.Warnf("Failed to send Start status on safe channel for start node")
+		dag.started.Store(false)
 		dag.startNode.SetSucceed(false)
-		return false
+		return fmt.Errorf("Start: failed to send trigger to start node")
 	}
 	dag.startNode.SetSucceed(true)
+	return nil
+}
+
+// Start is the bool-returning variant of StartE.
+func (dag *Dag) Start() bool {
+	if err := dag.StartE(); err != nil {
+		Log.Warnf("%v", err)
+		return false
+	}
 	return true
 }
 
@@ -1359,11 +1410,15 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 		return false
 	}
 
-	// DAG 종료 시 채널들을 안전하게 닫는다.
-	defer dag.closeChannels()
-
-	// Wait for all per-node goroutines to exit before returning.
-	defer dag.nodeWg.Wait()
+	// Cleanup (LIFO order of defer):
+	//   1. wait for all per-node goroutines to exit
+	//   2. clear the running flag so Reset() is safe to call
+	//   3. close all channels
+	defer func() {
+		dag.nodeWg.Wait()
+		dag.running.Store(false)
+		dag.closeChannels()
+	}()
 
 	// 컨텍스트에서 타임아웃 설정
 	var waitCtx context.Context
@@ -1419,6 +1474,19 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 			return false
 		}
 	}
+}
+
+// WaitE is the error-returning variant of Wait.  It returns nil when the DAG
+// completes successfully (FlightEnd from end_node), or a descriptive error on
+// context cancellation, timeout, or node failure.
+func (dag *Dag) WaitE(ctx context.Context) error {
+	if !dag.Wait(ctx) {
+		if ctx.Err() != nil {
+			return fmt.Errorf("DAG execution cancelled: %w", ctx.Err())
+		}
+		return fmt.Errorf("DAG execution failed; inspect dag.Errors for node-level failures")
+	}
+	return nil
 }
 
 // dfsState holds the per-traversal book-keeping maps used by detectCycleDFS.
