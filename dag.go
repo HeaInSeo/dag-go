@@ -867,26 +867,35 @@ func (dag *Dag) createNodeWithTimeOut(id string, ti time.Duration) *Node {
 //
 //nolint:gocognit // input validation + reserved-ID rules + node creation; each branch is simple but their total count is high
 func (dag *Dag) AddEdge(from, to string) error {
-	// 에러 로그를 기록하고 반환하는 클로저 함수
-	logErr := func(err error) error {
-		dag.errLogs = append(dag.errLogs, &systemError{AddEdge, err})
-		dag.reportError(err) // 에러 채널에 보고
+	// Pre-lock validation: these checks are pure reads of the arguments.
+	// dag.reportError uses SafeChannel.Send (has its own lock) so it is safe
+	// to call before acquiring dag.mu.  dag.errLogs is NOT touched here — that
+	// slice is only appended inside the lock via logErr below.
+	if from == to {
+		err := fmt.Errorf("from-node and to-node are same")
+		dag.reportError(err)
 		return err
 	}
-
-	// 입력값 검증
-	if from == to {
-		return logErr(fmt.Errorf("from-node and to-node are same"))
-	}
 	if utils.IsEmptyString(from) {
-		return logErr(fmt.Errorf("from-node is empty string"))
+		err := fmt.Errorf("from-node is empty string")
+		dag.reportError(err)
+		return err
 	}
 	if utils.IsEmptyString(to) {
-		return logErr(fmt.Errorf("to-node is empty string"))
+		err := fmt.Errorf("to-node is empty string")
+		dag.reportError(err)
+		return err
 	}
 
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
+
+	// logErr appends to errLogs (safe: under dag.mu) and reports to Errors channel.
+	logErr := func(err error) error {
+		dag.errLogs = append(dag.errLogs, &systemError{AddEdge, err})
+		dag.reportError(err)
+		return err
+	}
 
 	if dag.validated {
 		return logErr(fmt.Errorf("DAG is already finalized: AddEdge is not allowed after FinishDag"))
@@ -946,26 +955,32 @@ func (dag *Dag) AddEdge(from, to string) error {
 
 // AddEdgeIfNodesExist adds an edge only if both nodes already exist.
 func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
-	// 에러 로그를 기록하고 반환하는 클로저 함수
-	logErr := func(err error) error {
-		dag.errLogs = append(dag.errLogs, &systemError{AddEdgeIfNodesExist, err})
-		dag.reportError(err) // 에러 채널에 보고
+	// Pre-lock validation: argument-only checks; reportError is safe before lock.
+	if from == to {
+		err := fmt.Errorf("from-node and to-node are same")
+		dag.reportError(err)
 		return err
 	}
-
-	// 입력값 검증
-	if from == to {
-		return logErr(fmt.Errorf("from-node and to-node are same"))
-	}
 	if utils.IsEmptyString(from) {
-		return logErr(fmt.Errorf("from-node is empty string"))
+		err := fmt.Errorf("from-node is empty string")
+		dag.reportError(err)
+		return err
 	}
 	if utils.IsEmptyString(to) {
-		return logErr(fmt.Errorf("to-node is empty string"))
+		err := fmt.Errorf("to-node is empty string")
+		dag.reportError(err)
+		return err
 	}
 
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
+
+	// logErr appends to errLogs (safe: under dag.mu) and reports to Errors channel.
+	logErr := func(err error) error {
+		dag.errLogs = append(dag.errLogs, &systemError{AddEdgeIfNodesExist, err})
+		dag.reportError(err)
+		return err
+	}
 
 	if dag.validated {
 		return logErr(fmt.Errorf("DAG is already finalized: AddEdgeIfNodesExist is not allowed after FinishDag"))

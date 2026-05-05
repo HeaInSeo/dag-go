@@ -31,13 +31,23 @@ func NewSafeChannelGen[T any](buffer int) *SafeChannel[T] {
 }
 
 // Send attempts to deliver value to the channel. Returns false if the channel
-// is already closed or the buffer is full.
+// is already closed, if Close() has started (sc.done is closed), or if the
+// buffer is full.
+//
+// The sc.done check closes the narrow race window between Close() signalling
+// done (before acquiring the write lock) and setting sc.closed = true.
 func (sc *SafeChannel[T]) Send(value T) bool {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 
 	if sc.closed {
 		return false
+	}
+	// Non-blocking check: if Close() has already begun, treat as closed.
+	select {
+	case <-sc.done:
+		return false
+	default:
 	}
 	select {
 	case sc.ch <- value:
