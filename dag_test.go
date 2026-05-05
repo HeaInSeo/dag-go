@@ -3682,6 +3682,336 @@ func collectDagErrors(dag *Dag) []error {
 	}
 }
 
+// ── normalizeDagConfig ────────────────────────────────────────────────────────
+
+// TestNormalizeDagConfig_ClampsInvalidValues verifies that zero or negative
+// config fields are clamped to their safe minimums.
+//
+//nolint:gocognit // table-driven; each row checks 5 fields — complexity is proportional to correctness
+func TestNormalizeDagConfig_ClampsInvalidValues(t *testing.T) {
+	tests := []struct {
+		name string
+		in   DagConfig
+	}{
+		{"zero", DagConfig{}},
+		{"negative", DagConfig{
+			MinChannelBuffer:  -5,
+			MaxChannelBuffer:  -1,
+			StatusBuffer:      -10,
+			WorkerPoolSize:    -100,
+			ErrorDrainTimeout: -time.Second,
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := normalizeDagConfig(tt.in)
+			if cfg.MinChannelBuffer < 1 {
+				t.Errorf("MinChannelBuffer not clamped: got %d", cfg.MinChannelBuffer)
+			}
+			if cfg.MaxChannelBuffer < 1 {
+				t.Errorf("MaxChannelBuffer not clamped: got %d", cfg.MaxChannelBuffer)
+			}
+			if cfg.StatusBuffer < 1 {
+				t.Errorf("StatusBuffer not clamped: got %d", cfg.StatusBuffer)
+			}
+			if cfg.WorkerPoolSize < 1 {
+				t.Errorf("WorkerPoolSize not clamped: got %d", cfg.WorkerPoolSize)
+			}
+			if cfg.ErrorDrainTimeout <= 0 {
+				t.Errorf("ErrorDrainTimeout not clamped: got %v", cfg.ErrorDrainTimeout)
+			}
+		})
+	}
+}
+
+// ── getter methods (Edges / StartNodeID / EndNodeID) ─────────────────────────
+
+// TestGetters_Edges_StartNodeID_EndNodeID verifies the three read-only getter
+// methods return correct values at each stage of the DAG lifecycle.
+func TestGetters_Edges_StartNodeID_EndNodeID(t *testing.T) {
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+
+	// Before FinishDag: endNode is nil.
+	if id := d.EndNodeID(); id != "" {
+		t.Errorf("EndNodeID before FinishDag = %q, want empty", id)
+	}
+
+	// After InitDag: startNode already exists.
+	if id := d.StartNodeID(); id != StartNode {
+		t.Errorf("StartNodeID = %q, want %q", id, StartNode)
+	}
+
+	// No edges before AddEdge.
+	if edges := d.Edges(); len(edges) != 0 {
+		t.Errorf("Edges before AddEdge: got %d, want 0", len(edges))
+	}
+
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	if id := d.EndNodeID(); id != EndNode {
+		t.Errorf("EndNodeID after FinishDag = %q, want %q", id, EndNode)
+	}
+
+	edges := d.Edges()
+	if len(edges) == 0 {
+		t.Error("Edges should be non-empty after AddEdge + FinishDag")
+	}
+
+	// Verify Edges returns a defensive copy.
+	orig := edges[0]
+	edges[0] = nil
+	if d.Edges()[0] == nil {
+		t.Error("Edges must return a copy; modifying the returned slice must not affect the DAG")
+	}
+	_ = orig
+}
+
+// ── merge ─────────────────────────────────────────────────────────────────────
+
+// TestStartNodeID_NilStartNode verifies that StartNodeID returns an empty string
+// when the DAG's startNode has not been initialised (raw Dag struct).
+func TestStartNodeID_NilStartNode(t *testing.T) {
+	d := &Dag{}
+	if id := d.StartNodeID(); id != "" {
+		t.Errorf("StartNodeID of uninitialised Dag = %q, want empty", id)
+	}
+}
+
+// TestMerge_EmptyNodeResult verifies that merge returns false immediately when
+// nodeResult is nil (i.e. GetReady has not been called yet).
+func TestMerge_EmptyNodeResult(t *testing.T) {
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	// nodeResult is nil at this point — no GetReady has been called.
+	if d.merge(context.Background()) {
+		t.Error("merge should return false when nodeResult is empty")
+	}
+}
+
+// ── StartE additional paths ───────────────────────────────────────────────────
+
+// TestStartE_BeforeGetReady verifies that StartE returns an error when called
+// before GetReady (dag.nodeResult is nil).
+func TestStartE_BeforeGetReady(t *testing.T) {
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+	// NOT calling GetReady — nodeResult remains nil.
+	if err := d.StartE(); err == nil {
+		t.Error("StartE should return an error when called before GetReady")
+	}
+}
+
+// TestStartE_UnexpectedParentVertex verifies the defence-in-depth guard inside
+// StartE that rejects a startNode with unexpected parentVertex length.
+func TestStartE_UnexpectedParentVertex(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+
+	// Corrupt: add a spurious extra entry so len(parentVertex) == 2.
+	extra := NewSafeChannelGen[runningStatus](1)
+	d.startNode.parentVertex = append(d.startNode.parentVertex, extra)
+
+	if err := d.StartE(); err == nil {
+		t.Error("StartE should return an error for unexpected parentVertex length")
+	}
+	// started was rolled back; cancel ctx to unblock goroutines and clean up.
+	cancel()
+	d.Wait(ctx)
+}
+
+// TestStartE_TriggerSendFails verifies that StartE returns an error when the
+// trigger channel has been closed before the send, exercising the sc.Send
+// failure path.
+func TestStartE_TriggerSendFails(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+
+	// Close the trigger channel so sc.Send(Start) returns false.
+	// The runner goroutine waiting in preFlight will receive the zero value
+	// from the closed channel and proceed normally, so Wait still cleans up.
+	if err := d.startNode.parentVertex[0].Close(); err != nil {
+		t.Fatalf("Close trigger channel: %v", err)
+	}
+
+	if err := d.StartE(); err == nil {
+		t.Error("StartE should return an error when the trigger channel is closed")
+	}
+
+	// Wait cleans up the goroutines (they run to completion via the closed channel).
+	d.Wait(ctx)
+}
+
+// ── WaitE additional paths ────────────────────────────────────────────────────
+
+// ctxCancelRunnable blocks until the context is cancelled, then returns the
+// context error.  Used to keep a node in-flight long enough to cancel the DAG.
+type ctxCancelRunnable struct{}
+
+func (ctxCancelRunnable) RunE(ctx context.Context, _ interface{}) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// TestWaitE_ContextCancelled verifies that WaitE returns a wrapped
+// context.Canceled error when the caller cancels the context.
+func TestWaitE_ContextCancelled(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	err = d.AddEdge(StartNode, "blocker")
+	if err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	err = d.FinishDag()
+	if err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetNodeRunner("blocker", ctxCancelRunnable{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !d.Start() {
+		t.Fatal("Start failed")
+	}
+
+	// Cancel after a short delay to let the blocker node reach RunE.
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	err = d.WaitE(ctx)
+	if err == nil {
+		t.Fatal("WaitE should return an error when context is cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("WaitE error should wrap context.Canceled, got: %v", err)
+	}
+}
+
+// TestWaitE_DagFailed verifies that WaitE returns a non-nil error (without
+// wrapping a context error) when a node's RunE fails.
+func TestWaitE_DagFailed(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	err = d.FinishDag()
+	if err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetNodeRunner("A", &errorRunnable{err: fmt.Errorf("intentional failure")})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !d.Start() {
+		t.Fatal("Start failed")
+	}
+
+	err = d.WaitE(ctx)
+	if err == nil {
+		t.Fatal("WaitE should return an error when a node fails")
+	}
+	// Must NOT be a context error — the failure came from the node, not from timeout.
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		t.Errorf("WaitE error should not be a context error, got: %v", err)
+	}
+}
+
 // TestErrorReturnAPI_BasicLifecycle exercises the *E error-return API variants
 // through a complete lifecycle to confirm they behave identically to the bool
 // variants when called correctly.
