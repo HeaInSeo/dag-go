@@ -167,6 +167,26 @@ func (e *NodeError) Unwrap() error {
 	return e.Err
 }
 
+// parentReceiverFunc returns the errgroup worker that waits for one parent channel.
+// Returns nil when the parent signals a non-Failed status, or when policy is
+// ContinueOnError. Returns an error on Failed+FailFast or context cancellation.
+func parentReceiverFunc(egCtx context.Context, nodeID string, k int, sc *SafeChannel[runningStatus], policy ErrorPolicy) func() error {
+	return func() error {
+		pprof.SetGoroutineLabels(pprof.WithLabels(egCtx,
+			pprof.Labels("phase", "preFlight", "nodeId", nodeID, "channelIndex", strconv.Itoa(k)),
+		))
+		select {
+		case result := <-sc.GetChannel():
+			if result == Failed && policy == ErrorPolicyFailFast {
+				return fmt.Errorf("node %s: parent channel returned Failed", nodeID)
+			}
+			return nil
+		case <-egCtx.Done():
+			return egCtx.Err()
+		}
+	}
+}
+
 // preFlight waits for all parent channels to report a non-Failed status.
 // The caller's ctx is used directly — no execution timeout is applied here.
 // Execution timeouts (DefaultTimeout / Node.Timeout) are applied by connectRunner
@@ -177,8 +197,6 @@ func (e *NodeError) Unwrap() error {
 // parent channel immediately.  Limiting concurrency here would leave some parent
 // channels without a receiver, creating backpressure against postFlight even when
 // the channel is buffered.  Fan-in policy limits belong at the DAG validation layer.
-//
-//nolint:gocognit,gocyclo // fan-in select over multiple parent channels; complexity is inherent to the concurrent coordination logic.
 func preFlight(ctx context.Context, n *Node) *printStatus {
 	if n == nil {
 		return newPrintStatus(PreflightFailed, noNodeID)
@@ -210,20 +228,7 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 			})
 			break
 		}
-		eg.Go(func() error {
-			pprof.SetGoroutineLabels(pprof.WithLabels(egCtx,
-				pprof.Labels("phase", "preFlight", "nodeId", n.ID, "channelIndex", strconv.Itoa(k)),
-			))
-			select {
-			case result := <-sc.GetChannel():
-				if result == Failed && policy == ErrorPolicyFailFast {
-					return fmt.Errorf("node %s: parent channel returned Failed", n.ID)
-				}
-				return nil
-			case <-egCtx.Done():
-				return egCtx.Err()
-			}
-		})
+		eg.Go(parentReceiverFunc(egCtx, n.ID, k, sc, policy))
 	}
 
 	err := eg.Wait()

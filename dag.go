@@ -46,6 +46,10 @@ const (
 // It is the node ID when the condition that the node cannot be created.
 const noNodeID = "-1"
 
+// defaultErrorDrainFallback is the safe fallback drain timeout used when
+// DagConfig.ErrorDrainTimeout is not set (zero or negative).
+const defaultErrorDrainFallback = 5 * time.Second
+
 // ==================== 타입 정의 ====================
 
 // DagConfig holds tunable parameters for a Dag instance.
@@ -583,7 +587,7 @@ func NewDagWorkerPool(limit int) *DagWorkerPool {
 		taskQueue:   make(chan nodeTask, limit*2),
 	}
 
-	for i := 0; i < limit; i++ { //nolint:intrange
+	for range limit {
 		pool.wg.Add(1)
 		go func() {
 			defer pool.wg.Done()
@@ -675,8 +679,7 @@ func (dag *Dag) collectErrors(ctx context.Context) []error {
 
 	drainTimeout := dag.Config.ErrorDrainTimeout
 	if drainTimeout <= 0 {
-		//nolint:mnd // 5 s safe fallback when ErrorDrainTimeout was not set in DagConfig.
-		drainTimeout = 5 * time.Second
+		drainTimeout = defaultErrorDrainFallback
 	}
 	timeout := time.After(drainTimeout)
 	ch := dag.Errors.GetChannel()
@@ -718,46 +721,28 @@ func (dag *Dag) createEdge(parentID, childID string) (*Edge, createEdgeErrorType
 	return edge, Create
 }
 
+// closeSafeChannel closes sc and logs the result. It is a no-op when sc is nil.
+func closeSafeChannel[T any](sc *SafeChannel[T], label string) {
+	if sc == nil {
+		return
+	}
+	if err := sc.Close(); err != nil {
+		Log.Warnf("Failed to close %s channel: %v", label, err)
+	} else {
+		Log.Infof("Closed %s channel", label)
+	}
+}
+
 // closeChannels safely closes all channels in the DAG.
-//
-//nolint:gocognit // iterates over three independent channel slices; each branch is simple but overall count is high
 func (dag *Dag) closeChannels() {
 	for _, edge := range dag.edges {
-		if edge.safeVertex != nil {
-			if err := edge.safeVertex.Close(); err != nil {
-				Log.Warnf("Failed to close edge channel [%s -> %s]: %v", edge.parentID, edge.childID, err)
-			} else {
-				Log.Infof("Closed edge channel [%s -> %s]", edge.parentID, edge.childID)
-			}
-		}
+		closeSafeChannel(edge.safeVertex, fmt.Sprintf("edge [%s -> %s]", edge.parentID, edge.childID))
 	}
-
-	if dag.NodesResult != nil {
-		if err := dag.NodesResult.Close(); err != nil {
-			Log.Warnf("Failed to close NodesResult channel: %v", err)
-		} else {
-			Log.Info("Closed NodesResult channel")
-		}
-	}
-
+	closeSafeChannel(dag.NodesResult, "NodesResult")
 	for i, sc := range dag.nodeResult {
-		if sc == nil {
-			continue
-		}
-		if err := sc.Close(); err != nil {
-			Log.Warnf("Failed to close nodeResult[%d] channel: %v", i, err)
-		} else {
-			Log.Infof("Closed nodeResult[%d] channel", i)
-		}
+		closeSafeChannel(sc, fmt.Sprintf("nodeResult[%d]", i))
 	}
-
-	if dag.Errors != nil {
-		if err := dag.Errors.Close(); err != nil {
-			Log.Warnf("Failed to close Errors channel: %v", err)
-		} else {
-			Log.Info("Closed Errors channel")
-		}
-	}
+	closeSafeChannel(dag.Errors, "Errors")
 }
 
 // getSafeVertex returns the SafeChannel for the edge between parentID and childID,
@@ -927,27 +912,26 @@ func (dag *Dag) createNodeWithTimeOut(id string, ti time.Duration) *Node {
 	return node
 }
 
-// AddEdge adds an edge between two nodes with improved error handling.
-// Returns an error if the DAG has already been finalized by FinishDag.
-//
-//nolint:gocognit // input validation + reserved-ID rules + node creation; each branch is simple but their total count is high
-func (dag *Dag) AddEdge(from, to string) error {
-	// Pre-lock validation: these checks are pure reads of the arguments.
-	// dag.reportError uses SafeChannel.Send (has its own lock) so it is safe
-	// to call before acquiring dag.mu.  dag.errLogs is NOT touched here — that
-	// slice is only appended inside the lock via logErr below.
+// validateEdgeArgs performs argument-only validation that can run before the
+// DAG lock is acquired.  dag.reportError is safe to call without the lock
+// (SafeChannel.Send has its own lock); dag.errLogs is NOT touched here.
+func validateEdgeArgs(from, to string) error {
 	if from == to {
-		err := fmt.Errorf("from-node and to-node are same")
-		dag.reportError(err)
-		return err
+		return fmt.Errorf("from-node and to-node are same")
 	}
 	if utils.IsEmptyString(from) {
-		err := fmt.Errorf("from-node is empty string")
-		dag.reportError(err)
-		return err
+		return fmt.Errorf("from-node is empty string")
 	}
 	if utils.IsEmptyString(to) {
-		err := fmt.Errorf("to-node is empty string")
+		return fmt.Errorf("to-node is empty string")
+	}
+	return nil
+}
+
+// AddEdge adds an edge between two nodes with improved error handling.
+// Returns an error if the DAG has already been finalized by FinishDag.
+func (dag *Dag) AddEdge(from, to string) error {
+	if err := validateEdgeArgs(from, to); err != nil {
 		dag.reportError(err)
 		return err
 	}
@@ -1025,19 +1009,7 @@ func (dag *Dag) AddEdge(from, to string) error {
 
 // AddEdgeIfNodesExist adds an edge only if both nodes already exist.
 func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
-	// Pre-lock validation: argument-only checks; reportError is safe before lock.
-	if from == to {
-		err := fmt.Errorf("from-node and to-node are same")
-		dag.reportError(err)
-		return err
-	}
-	if utils.IsEmptyString(from) {
-		err := fmt.Errorf("from-node is empty string")
-		dag.reportError(err)
-		return err
-	}
-	if utils.IsEmptyString(to) {
-		err := fmt.Errorf("to-node is empty string")
+	if err := validateEdgeArgs(from, to); err != nil {
 		dag.reportError(err)
 		return err
 	}
@@ -1141,9 +1113,60 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error {
 	return nil
 }
 
+// checkIsolatedNodes returns an error if any node has neither parents nor children.
+// A single-node DAG is valid only if that node is StartNode.
+// dag.mu must be held by the caller.
+func checkIsolatedNodes(nodes []*Node) error {
+	for _, n := range nodes {
+		if len(n.children) > 0 || len(n.parent) > 0 {
+			continue
+		}
+		if len(nodes) == 1 && n.ID == StartNode {
+			continue
+		}
+		if len(nodes) == 1 {
+			return fmt.Errorf("invalid node: only node is not the start node")
+		}
+		return fmt.Errorf("node '%s' has no parent and no children", n.ID)
+	}
+	return nil
+}
+
+// checkReachable returns an error if any non-StartNode is not reachable from StartNode.
+// dag.mu must be held by the caller.
+func checkReachable(dag *Dag, nodes []*Node) error {
+	reachable := reachableFromStart(dag)
+	for _, n := range nodes {
+		if n.ID == StartNode {
+			continue
+		}
+		if !reachable[n.ID] {
+			return fmt.Errorf("node %q is not reachable from start_node", n.ID)
+		}
+	}
+	return nil
+}
+
+// validateTopology performs all read-only structural checks before FinishDag commits
+// any graph mutation. dag.mu must be held by the caller.
+func (dag *Dag) validateTopology(nodes []*Node) error {
+	if dag.startNode == nil {
+		return fmt.Errorf("start node is missing; call StartDag or InitDag before FinishDag")
+	}
+	if err := checkIsolatedNodes(nodes); err != nil {
+		return err
+	}
+	if err := checkReachable(dag, nodes); err != nil {
+		return err
+	}
+	// 사이클 검사: EndNode 추가 전에 실행하여 실패 시 그래프를 변경하지 않는다.
+	if detectCycle(dag) {
+		return fmt.Errorf("FinishDag: %w", ErrCycleDetected)
+	}
+	return nil
+}
+
 // FinishDag finalizes the DAG by connecting end nodes and validating the structure.
-//
-//nolint:gocognit,gocyclo // DAG finalization requires multiple sequential validation steps; splitting would obscure the overall flow
 func (dag *Dag) FinishDag() error {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
@@ -1151,7 +1174,7 @@ func (dag *Dag) FinishDag() error {
 	// 에러 로그를 기록하고 반환하는 클로저 함수 (finishDag 에러 타입 사용)
 	logErr := func(err error) error {
 		dag.errLogs = append(dag.errLogs, &systemError{FinishDag, err})
-		dag.reportError(err) // 에러 채널에 보고
+		dag.reportError(err)
 		return err
 	}
 
@@ -1160,12 +1183,9 @@ func (dag *Dag) FinishDag() error {
 	if dag.nodeResult != nil {
 		return logErr(fmt.Errorf("FinishDag: DAG topology is frozen after GetReady; call Reset before modifying the graph"))
 	}
-	// 이미 검증이 완료된 경우
 	if dag.validated {
 		return logErr(fmt.Errorf("validated is already set to true"))
 	}
-
-	// 노드가 하나도 없는 경우
 	if len(dag.nodes) == 0 {
 		return logErr(fmt.Errorf("no node"))
 	}
@@ -1180,43 +1200,8 @@ func (dag *Dag) FinishDag() error {
 	// All checks that can return an error run before any structural changes so
 	// that a failed FinishDag leaves the DAG in exactly the state it was in
 	// before the call.
-
-	// StartNode must exist: it is created by StartDag / InitDag.
-	if dag.startNode == nil {
-		return logErr(fmt.Errorf("start node is missing; call StartDag or InitDag before FinishDag"))
-	}
-
-	for _, n := range nodes {
-		// 부모와 자식이 없는 고립된 노드가 있는 경우
-		if len(n.children) == 0 && len(n.parent) == 0 {
-			if len(nodes) == 1 {
-				if n.ID != StartNode {
-					return logErr(fmt.Errorf("invalid node: only node is not the start node"))
-				}
-			} else {
-				return logErr(fmt.Errorf("node '%s' has no parent and no children", n.ID))
-			}
-		}
-	}
-
-	// Reachability check: every user-defined node must be reachable from
-	// StartNode via forward edges.  A disconnected component would bypass the
-	// Start() trigger — its preFlight passes immediately (no parentVertex) and
-	// the nodes begin executing as soon as GetReady is called.
-	reachable := reachableFromStart(dag)
-	for _, n := range nodes {
-		if n.ID == StartNode {
-			continue
-		}
-		if !reachable[n.ID] {
-			return logErr(fmt.Errorf("node %q is not reachable from start_node", n.ID))
-		}
-	}
-
-	// 사이클 검사: EndNode 추가 전에 실행하여 실패 시 그래프를 변경하지 않는다.
-	// FinishDag 는 이미 dag.mu.Lock() 을 보유하고 있으므로 내부 함수를 직접 호출.
-	if detectCycle(dag) {
-		return logErr(fmt.Errorf("FinishDag: %w", ErrCycleDetected))
+	if err := dag.validateTopology(nodes); err != nil {
+		return logErr(err)
 	}
 
 	// ── Phase 2: commit — graph mutation only after all checks pass ───────────
@@ -1240,7 +1225,6 @@ func (dag *Dag) FinishDag() error {
 		}
 	}
 
-	// 검증 완료 플래그 설정
 	dag.validated = true
 	return nil
 }

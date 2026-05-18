@@ -12,6 +12,13 @@ on:
       - "LICENSE*"
       - ".github/**/*.md"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: Run on Ubuntu
@@ -30,3 +37,12 @@ jobs:
           go mod tidy
           git diff --exit-code
           make test
+
+      - name: Generate coverage report
+        run: make coverage
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dag-go-coverage
+          path: reports/
