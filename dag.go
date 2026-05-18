@@ -229,7 +229,13 @@ type Dag struct {
 	nodeCount      int64        // total user-defined node count (atomic)
 	completedCount int64        // nodes that called MarkCompleted (atomic)
 	droppedErrors  int64        // errors dropped by reportError (atomic)
-	mu             sync.RWMutex // guards nodes map, ContainerCmd, runnerResolver
+	mu             sync.RWMutex // guards nodes map, ContainerCmd, runnerResolver, nodeResult, startTrigger
+
+	// startTrigger is the validated start-node trigger channel captured by
+	// GetReadyE after structural invariants are confirmed.  StartE uses only
+	// this field to fire the DAG — it never reads startNode.parentVertex while
+	// goroutines are live.  Nil until GetReadyE succeeds; cleared by reset().
+	startTrigger *SafeChannel[runningStatus]
 }
 
 // Edge represents a directed connection between two nodes.
@@ -1248,6 +1254,9 @@ func (dag *Dag) reset() {
 
 	// Clear the one-per-run atomic flags so the next run can proceed.
 	dag.started.Store(false)
+	// startTrigger is re-captured by the next GetReadyE call after ConnectRunner
+	// rewires the fresh parentVertex channels created above.
+	dag.startTrigger = nil
 }
 
 // Reset reinitialises a completed DAG so it can be executed again without
@@ -1359,6 +1368,17 @@ func (dag *Dag) GetReadyE(ctx context.Context) error {
 		}
 	}
 
+	// Validate startNode topology before launching any goroutines.
+	// Structural invariants must be confirmed while the DAG is quiescent —
+	// once goroutines are live, parentVertex / childrenVertex are immutable.
+	// If this check fails the caller can fix the DAG state and retry;
+	// no goroutines have been started yet so there is nothing to clean up.
+	if len(dag.startNode.parentVertex) != 1 {
+		return fmt.Errorf("GetReady: startNode has unexpected parentVertex length %d (want 1)",
+			len(dag.startNode.parentVertex))
+	}
+	dag.startTrigger = dag.startNode.parentVertex[0]
+
 	dag.execSem = make(chan struct{}, dag.Config.WorkerPoolSize)
 	safeChs := make([]*SafeChannel[*printStatus], 0, n)
 
@@ -1386,27 +1406,35 @@ func (dag *Dag) GetReady(ctx context.Context) bool {
 	return true
 }
 
-// StartE fires the DAG by sending a trigger signal to the start node's input
-// channel.  All node goroutines are already waiting (submitted by GetReady);
+// StartE fires the DAG by sending a trigger signal to the start-node trigger
+// channel captured by GetReadyE.  All node goroutines are already waiting;
 // this single send unblocks the start node and cascades through the graph.
 //
 // Call StartE exactly once after GetReady.  Returns an error if GetReady was
 // not called, if Start was already called for this run, or if the trigger
 // send fails unexpectedly.
+//
+// StartE never reads startNode.parentVertex directly — it uses the
+// dag.startTrigger channel that GetReadyE captured and validated before any
+// goroutines were launched.  This guarantees no concurrent access to the
+// parentVertex slice while goroutines are live.
 func (dag *Dag) StartE() error {
-	if dag.startNode == nil || dag.nodeResult == nil {
+	// Snapshot nodeResult and startTrigger under read lock so we observe a
+	// consistent view of GetReadyE's writes.  The lock is released before
+	// Send so that dag.mu is never held during a channel operation.
+	dag.mu.RLock()
+	nodeResult := dag.nodeResult
+	trigger := dag.startTrigger
+	dag.mu.RUnlock()
+
+	if nodeResult == nil || trigger == nil {
 		return fmt.Errorf("Start: call GetReady before Start")
 	}
 	// Reject duplicate Start calls for the same run.
 	if !dag.started.CompareAndSwap(false, true) {
 		return fmt.Errorf("Start: already called; Start must be called exactly once per run")
 	}
-	if len(dag.startNode.parentVertex) != 1 {
-		dag.started.Store(false) // rollback so Reset can clear it cleanly
-		return fmt.Errorf("Start: unexpected parentVertex length %d", len(dag.startNode.parentVertex))
-	}
-	sc := dag.startNode.parentVertex[0]
-	if !sc.Send(Start) {
+	if !trigger.Send(Start) {
 		dag.started.Store(false)
 		dag.startNode.SetSucceed(false)
 		return fmt.Errorf("Start: failed to send trigger to start node")
@@ -1944,8 +1972,10 @@ func mermaidEscapeLabel(s string) string {
 // running the copy cannot affect the original.
 //
 // Items NOT copied: per-node runners (Node.runnerVal), execSem, nodeResult,
-// errLogs, and runnerResolver.  Per-node runners are intentionally excluded
-// because they are stateful closures bound to the original DAG's channels.
+// startTrigger, errLogs, and runnerResolver.  startTrigger is intentionally
+// omitted — it is nil until GetReadyE validates and captures it; the copy must
+// go through GetReady independently.  Per-node runners are excluded because
+// they are stateful closures bound to the original DAG's channels.
 // The caller must wire runners and follow the standard lifecycle on the copy:
 //
 //	ConnectRunner → GetReady → Start → Wait

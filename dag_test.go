@@ -3805,7 +3805,7 @@ func TestMerge_EmptyNodeResult(t *testing.T) {
 // ── StartE additional paths ───────────────────────────────────────────────────
 
 // TestStartE_BeforeGetReady verifies that StartE returns an error when called
-// before GetReady (dag.nodeResult is nil).
+// before GetReady (dag.nodeResult and dag.startTrigger are both nil).
 func TestStartE_BeforeGetReady(t *testing.T) {
 	Log.SetOutput(io.Discard)
 
@@ -3829,9 +3829,11 @@ func TestStartE_BeforeGetReady(t *testing.T) {
 	}
 }
 
-// TestStartE_UnexpectedParentVertex verifies the defence-in-depth guard inside
-// StartE that rejects a startNode with unexpected parentVertex length.
-func TestStartE_UnexpectedParentVertex(t *testing.T) {
+// TestGetReadyE_UnexpectedStartParentVertex verifies that GetReadyE rejects
+// a startNode with unexpected parentVertex length BEFORE launching any
+// goroutines.  The DAG must remain quiescent so the caller can fix state and
+// retry without any cleanup burden.
+func TestGetReadyE_UnexpectedStartParentVertex(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	Log.SetOutput(io.Discard)
 
@@ -3850,25 +3852,22 @@ func TestStartE_UnexpectedParentVertex(t *testing.T) {
 		t.Fatal("ConnectRunner failed")
 	}
 
-	// Corrupt BEFORE GetReady so the append happens before goroutines are
-	// launched — avoiding a data race between the test goroutine writing the
-	// slice and preFlight goroutines reading it concurrently.
+	// Corrupt parentVertex while the DAG is fully quiescent (no goroutines).
+	// GetReadyE must detect this before starting any goroutines.
 	extra := NewSafeChannelGen[runningStatus](1)
 	d.startNode.parentVertex = append(d.startNode.parentVertex, extra)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-
-	if !d.GetReady(ctx) {
-		t.Fatal("GetReady failed")
+	if err := d.GetReadyE(context.Background()); err == nil {
+		t.Error("GetReadyE should return an error for unexpected startNode parentVertex length")
 	}
-
-	if err := d.StartE(); err == nil {
-		t.Error("StartE should return an error for unexpected parentVertex length")
+	// nodeResult must remain nil — no goroutines were launched.
+	if d.nodeResult != nil {
+		t.Error("nodeResult must be nil: GetReadyE must not launch goroutines when validation fails")
 	}
-	// started was rolled back; cancel ctx to unblock goroutines and clean up.
-	cancel()
-	d.Wait(ctx)
+	// startTrigger must also remain nil.
+	if d.startTrigger != nil {
+		t.Error("startTrigger must be nil after GetReadyE validation failure")
+	}
 }
 
 // TestStartE_TriggerSendFails verifies that StartE returns an error when the
@@ -3900,10 +3899,10 @@ func TestStartE_TriggerSendFails(t *testing.T) {
 		t.Fatal("GetReady failed")
 	}
 
-	// Close the trigger channel so sc.Send(Start) returns false.
-	// The runner goroutine waiting in preFlight will receive the zero value
-	// from the closed channel and proceed normally, so Wait still cleans up.
-	if err := d.startNode.parentVertex[0].Close(); err != nil {
+	// Close the trigger channel via startTrigger (captured by GetReadyE).
+	// Accessing parentVertex directly after GetReady is forbidden — topology
+	// fields are immutable while goroutines are live.
+	if err := d.startTrigger.Close(); err != nil {
 		t.Fatalf("Close trigger channel: %v", err)
 	}
 
