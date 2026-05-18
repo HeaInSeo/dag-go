@@ -189,6 +189,14 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 	// the node's execution budget. See connectRunner for where timeouts are applied.
 	eg, egCtx := errgroup.WithContext(ctx)
 
+	// Snapshot the policy before launching goroutines.
+	// With ContinueOnError, a Failed parent signal is not treated as a preFlight
+	// error — the child always proceeds to inFlight regardless of parent outcome.
+	policy := ErrorPolicyFailFast
+	if n.parentDag != nil {
+		policy = n.parentDag.Config.ErrorPolicy
+	}
+
 	for k, sc := range n.parentVertex {
 		if sc == nil {
 			// parentVertex must never be nil — this indicates a construction bug.
@@ -208,7 +216,7 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 			))
 			select {
 			case result := <-sc.GetChannel():
-				if result == Failed {
+				if result == Failed && policy == ErrorPolicyFailFast {
 					return fmt.Errorf("node %s: parent channel returned Failed", n.ID)
 				}
 				return nil

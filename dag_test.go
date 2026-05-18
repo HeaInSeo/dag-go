@@ -3850,16 +3850,18 @@ func TestStartE_UnexpectedParentVertex(t *testing.T) {
 		t.Fatal("ConnectRunner failed")
 	}
 
+	// Corrupt BEFORE GetReady so the append happens before goroutines are
+	// launched — avoiding a data race between the test goroutine writing the
+	// slice and preFlight goroutines reading it concurrently.
+	extra := NewSafeChannelGen[runningStatus](1)
+	d.startNode.parentVertex = append(d.startNode.parentVertex, extra)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	if !d.GetReady(ctx) {
 		t.Fatal("GetReady failed")
 	}
-
-	// Corrupt: add a spurious extra entry so len(parentVertex) == 2.
-	extra := NewSafeChannelGen[runningStatus](1)
-	d.startNode.parentVertex = append(d.startNode.parentVertex, extra)
 
 	if err := d.StartE(); err == nil {
 		t.Error("StartE should return an error for unexpected parentVertex length")
@@ -4049,4 +4051,170 @@ func TestErrorReturnAPI_BasicLifecycle(t *testing.T) {
 	}
 
 	dag.ResetE() //nolint:errcheck
+}
+
+// ==================== Stage 8 — Error Handling Hardening Tests ====================
+
+// TestErrNoRunner_Structured verifies that execute returns a *NodeError wrapping
+// ErrNoRunner so callers can extract both errors.Is and errors.As information.
+func TestErrNoRunner_Structured(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	n := &Node{ID: "missing-runner-node"}
+	// No runner stored — getRunnerSnapshot returns nil → execute returns *NodeError.
+	err := execute(context.Background(), n)
+
+	if !errors.Is(err, ErrNoRunner) {
+		t.Fatalf("errors.Is ErrNoRunner: got %v", err)
+	}
+
+	var ne *NodeError
+	if !errors.As(err, &ne) {
+		t.Fatal("errors.As *NodeError failed — structured error not returned")
+	}
+	if ne.NodeID != "missing-runner-node" {
+		t.Errorf("NodeError.NodeID = %q, want %q", ne.NodeID, "missing-runner-node")
+	}
+	if ne.Phase != "execute" {
+		t.Errorf("NodeError.Phase = %q, want %q", ne.Phase, "execute")
+	}
+}
+
+// TestErrCount_Basic verifies that ErrCount reflects the number of buffered errors
+// and resets to zero after Reset.
+func TestErrCount_Basic(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	dag := NewDag()
+	if got := dag.ErrCount(); got != 0 {
+		t.Fatalf("initial ErrCount = %d, want 0", got)
+	}
+
+	dag.Errors.Send(fmt.Errorf("err1")) //nolint:errcheck
+	dag.Errors.Send(fmt.Errorf("err2")) //nolint:errcheck
+	dag.Errors.Send(fmt.Errorf("err3")) //nolint:errcheck
+	if got := dag.ErrCount(); got != 3 {
+		t.Fatalf("ErrCount after 3 sends = %d, want 3", got)
+	}
+
+	// Drain one error and verify count decrements.
+	<-dag.Errors.GetChannel()
+	if got := dag.ErrCount(); got != 2 {
+		t.Fatalf("ErrCount after drain = %d, want 2", got)
+	}
+}
+
+// TestErrorPolicy_ContinueOnError verifies that with ErrorPolicyContinueOnError,
+// downstream nodes execute even when an upstream node has failed.
+// Topology: start → A(fails) → B(succeeds) → end
+//
+//nolint:gocognit // topology setup + multi-node status assertion
+func TestErrorPolicy_ContinueOnError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDagWithOptions(WithErrorPolicy(ErrorPolicyContinueOnError))
+	if err != nil {
+		t.Fatalf("InitDagWithOptions: %v", err)
+	}
+
+	for _, e := range []struct{ from, to string }{
+		{StartNode, "A"},
+		{"A", "B"},
+	} {
+		if err := dag.AddEdge(e.from, e.to); err != nil {
+			t.Fatalf("AddEdge %s→%s: %v", e.from, e.to, err)
+		}
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	// A fails; B would be Skipped under FailFast but must Succeed here.
+	if !dag.SetNodeRunner("A", failingRunner{}) {
+		t.Fatal("SetNodeRunner A failed")
+	}
+	if !dag.SetNodeRunner("B", NoopCmd{}) {
+		t.Fatal("SetNodeRunner B failed")
+	}
+
+	dag.ConnectRunner()
+	ctx := context.Background()
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+
+	// With ContinueOnError: B runs and succeeds → end_node reaches FlightEnd → true.
+	if !dag.Wait(ctx) {
+		t.Error("expected Wait to return true with ContinueOnError (B should complete)")
+	}
+
+	bNode := dag.nodes["B"]
+	if bNode == nil {
+		t.Fatal("node B not found in DAG")
+	}
+	if got := bNode.GetStatus(); got != NodeStatusSucceeded {
+		t.Errorf("node B status = %v, want NodeStatusSucceeded", got)
+	}
+
+	// A still recorded a failure in the Errors channel.
+	if dag.ErrCount() == 0 {
+		t.Error("expected at least one error recorded for the failing node A")
+	}
+}
+
+// TestErrorPolicy_FailFast_Default verifies that the zero-value DagConfig
+// still uses FailFast semantics (no behaviour change from Stage 7).
+func TestErrorPolicy_FailFast_Default(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag() // default policy = FailFast
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+
+	for _, e := range []struct{ from, to string }{
+		{StartNode, "A"},
+		{"A", "B"},
+	} {
+		if err := dag.AddEdge(e.from, e.to); err != nil {
+			t.Fatalf("AddEdge %s→%s: %v", e.from, e.to, err)
+		}
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	if !dag.SetNodeRunner("A", failingRunner{}) {
+		t.Fatal("SetNodeRunner A failed")
+	}
+	if !dag.SetNodeRunner("B", NoopCmd{}) {
+		t.Fatal("SetNodeRunner B failed")
+	}
+
+	dag.ConnectRunner()
+	ctx := context.Background()
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+
+	if dag.Wait(ctx) {
+		t.Error("expected Wait to return false under FailFast when A fails")
+	}
+
+	bNode := dag.nodes["B"]
+	if bNode == nil {
+		t.Fatal("node B not found")
+	}
+	st := bNode.GetStatus()
+	if st == NodeStatusSucceeded {
+		t.Errorf("node B should not have Succeeded under FailFast, got %v", st)
+	}
 }

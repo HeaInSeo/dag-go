@@ -92,6 +92,12 @@ type DagConfig struct {
 	// field avoids incremental map rehashing and slice growth during AddEdge
 	// calls.  Zero means let the runtime decide the initial capacity.
 	ExpectedNodeCount int
+
+	// ErrorPolicy controls how downstream nodes react to upstream failures.
+	// ErrorPolicyFailFast (default, zero value) skips children of a failed node.
+	// ErrorPolicyContinueOnError allows children to run regardless of parent outcome;
+	// errors are still recorded in the Errors channel and DroppedErrors counter.
+	ErrorPolicy ErrorPolicy
 }
 
 // DagOption is a functional-option type for NewDagWithOptions.
@@ -514,6 +520,16 @@ func WithWorkerPool(size int) DagOption {
 	}
 }
 
+// WithErrorPolicy sets the error propagation policy for this DAG.
+// ErrorPolicyFailFast (default) skips downstream nodes when a parent fails.
+// ErrorPolicyContinueOnError allows all nodes to run regardless of parent failures;
+// errors are still reported via the Errors channel.
+func WithErrorPolicy(p ErrorPolicy) DagOption {
+	return func(dag *Dag) {
+		dag.Config.ErrorPolicy = p
+	}
+}
+
 // ==================== DagWorkerPool 메서드 ====================
 
 // NewDagWorkerPool creates a new worker pool with the given number of goroutines.
@@ -735,6 +751,13 @@ func (dag *Dag) Progress() float64 {
 // too small or that the Errors channel consumer is not draining fast enough.
 func (dag *Dag) DroppedErrors() int64 {
 	return atomic.LoadInt64(&dag.droppedErrors)
+}
+
+// ErrCount returns the number of errors currently buffered in the Errors channel.
+// The count is a point-in-time snapshot and may change immediately after the call.
+// Use DroppedErrors to check for errors that overflowed the buffer capacity.
+func (dag *Dag) ErrCount() int {
+	return len(dag.Errors.GetChannel())
 }
 
 // Edges returns a shallow copy of the DAG's edge list.  The slice is safe to
@@ -1613,9 +1636,14 @@ func connectRunner(n *Node) {
 			}
 		}
 
-		// CheckParentsStatus internally calls TransitionStatus(Pending, Skipped)
-		// when a parent has failed, so no additional SetStatus call is needed here.
-		if !n.CheckParentsStatus() {
+		// With FailFast (default), skip this node if any parent is already Failed.
+		// CheckParentsStatus internally transitions the node to Skipped via CAS.
+		// With ContinueOnError, all nodes run regardless of parent outcome.
+		policy := ErrorPolicyFailFast
+		if n.parentDag != nil {
+			policy = n.parentDag.Config.ErrorPolicy
+		}
+		if policy == ErrorPolicyFailFast && !n.CheckParentsStatus() {
 			ps := newPrintStatus(PostFlightFailed, n.ID)
 			sendResult(ps)
 			n.notifyChildren(ctx, Failed)

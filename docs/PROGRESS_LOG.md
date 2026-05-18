@@ -5,11 +5,11 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 13 — Performance Regression Analysis & High-Intensity Stability Validation (fully completed)
+## Current Status: Stage 14 — Error Handling Hardening (fully completed)
 
 **Branch:** `main`
-**Last updated:** 2026-02-28
-**Coverage:** 90.0% (목표 90%+ 달성)
+**Last updated:** 2026-05-18
+**Coverage:** 92.6% (Stage 13 대비 +2.6%p)
 
 ---
 
@@ -330,3 +330,6 @@ Update this file at the start and end of every stage.
 | `preFlight` goroutine bounding | `eg.SetLimit(10)` + `eg.Go` | SetLimit caps concurrent parent-channel readers; `eg.Go` (NOT TryGo) blocks until a slot is available — all parents are always processed regardless of parent count |
 | `fanIn` race guard | `SendBlocking` with egCtx | Replaced direct `chan` write with `merged.SendBlocking(egCtx, val)`; eliminates write/close race when `closeChannels()` fires concurrently |
 | `WorkerPoolSize` correctness | Must ≥ node count | With too few workers, EndNode preFlight goroutines can block waiting for sibling results while siblings are queued — causing deadlock; default `nodeCount + 10` is safety margin |
+| `ErrNoRunner` structured error | `*NodeError` wrapping sentinel | `execute()` returns `&NodeError{NodeID, Phase:"execute", Err:ErrNoRunner}`; `errors.Is` + `errors.As` both work |
+| `Dag.ErrCount()` | `len(ch)` snapshot | Returns buffered error count without draining; pair with `DroppedErrors()` for full picture |
+| `ErrorPolicy` / `WithErrorPolicy` | `DagConfig.ErrorPolicy` field | `FailFast` (default, zero value) skips children; `ContinueOnError` bypasses CheckParentsStatus guard and treats `Failed` parent signal as non-error in preFlight |

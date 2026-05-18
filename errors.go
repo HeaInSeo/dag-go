@@ -25,3 +25,18 @@ const (
 	addEndNode
 	FinishDag
 )
+
+// ErrorPolicy controls how downstream nodes react to upstream failures.
+type ErrorPolicy int
+
+const (
+	// ErrorPolicyFailFast causes downstream nodes to be skipped when any parent
+	// node fails. This is the default and preserves the invariant that no node
+	// runs after a dependency failure.
+	ErrorPolicyFailFast ErrorPolicy = iota
+
+	// ErrorPolicyContinueOnError allows downstream nodes to execute even when a
+	// parent has failed. Nodes proceed through all three flight phases regardless
+	// of parent outcome; per-node errors are still collected via Errors channel.
+	ErrorPolicyContinueOnError
+)

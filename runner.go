@@ -75,11 +75,12 @@ func (n *Node) SetRunner(r Runnable) bool {
 }
 
 // execute calls the node's resolved Runnable with the given context.
-// Returns ErrNoRunner when no Runnable has been configured.
+// Returns a *NodeError wrapping ErrNoRunner when no Runnable has been configured;
+// callers can use errors.Is(err, ErrNoRunner) or errors.As(err, &*NodeError{}).
 func execute(ctx context.Context, this *Node) error {
 	r := this.getRunnerSnapshot() // snapshot just before execution
 	if r == nil {
-		return ErrNoRunner
+		return &NodeError{NodeID: this.ID, Phase: "execute", Err: ErrNoRunner}
 	}
 	return r.RunE(ctx, this)
 }
