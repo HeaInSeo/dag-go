@@ -2,12 +2,20 @@ name: Benchmarks
 
 on:
   # 벤치마크는 수동으로만 실행한다.
-  # 성능 측정은 노이즈가 많아 push/PR 마다 자동 실행하지 않는다.
+  # GitHub Actions 러너 환경은 노이즈가 많아 push/PR마다 자동 실행하지 않는다.
+  # 추세 차트는 https://heainseo.github.io/dag-go/dev/bench/ 에서 확인한다.
   workflow_dispatch:
+
+permissions:
+  contents: write  # gh-pages 브랜치에 벤치마크 결과를 push하기 위해 필요
+
+concurrency:
+  group: bench-pages
+  cancel-in-progress: false  # 벤치마크는 직렬 실행: 데이터 손실 방지
 
 jobs:
   bench:
-    name: Run on Ubuntu
+    name: Run and publish benchmarks
     runs-on: ubuntu-latest
     steps:
       - name: Clone the code
@@ -20,4 +28,20 @@ jobs:
 
       - name: Run Benchmarks
         run: |
-          go test -bench=. -benchmem -benchtime=3s -run=^$ ./...
+          go test -bench=. -benchmem -benchtime=3s -run=^$ ./... | tee bench-output.txt
+
+      - name: Publish benchmark results to GitHub Pages
+        uses: benchmark-action/github-action-benchmark@v1
+        with:
+          name: dag-go benchmarks
+          tool: go
+          output-file-path: bench-output.txt
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          auto-push: true
+          gh-pages-branch: gh-pages
+          benchmark-data-dir-path: dev/bench
+          # 110%: 직전 대비 10% 이상 성능 저하 시 PR 코멘트 알림
+          alert-threshold: "110%"
+          comment-on-alert: true
+          fail-on-alert: false
+          alert-comment-cc-users: "@HeaInSeo"

@@ -12,9 +12,6 @@ on:
       - "LICENSE*"
       - ".github/**/*.md"
 
-permissions:
-  contents: read
-
 concurrency:
   group: test-${{ github.ref }}
   cancel-in-progress: true
@@ -23,6 +20,8 @@ jobs:
   test:
     name: Run on Ubuntu
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Clone the code
         uses: actions/checkout@v4
@@ -41,8 +40,36 @@ jobs:
       - name: Generate coverage report
         run: make coverage
 
+      - name: Generate coverage HTML
+        run: go tool cover -html=reports/cover.out -o reports/index.html
+
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
           name: dag-go-coverage
           path: reports/
+
+  # main 브랜치 push 시에만 커버리지를 Pages에 배포한다.
+  # 별도 Job으로 분리하여 PR 실행 시에는 contents: write 권한이 부여되지 않도록 한다.
+  deploy-coverage:
+    name: Deploy coverage to GitHub Pages
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # peaceiris/actions-gh-pages 가 gh-pages 브랜치에 push하기 위해 필요
+    steps:
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dag-go-coverage
+          path: reports/
+
+      # keep_files: true 로 벤치마크 데이터(dev/bench/)를 보존한다.
+      - name: Publish to gh-pages/coverage/
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: reports/
+          destination_dir: coverage
+          keep_files: true
