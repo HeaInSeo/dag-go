@@ -5,11 +5,12 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 14 — Error Handling Hardening (fully completed)
+## Current Status: Stage 15 — DAG Execution Lifecycle Stabilization (fully completed)
 
 **Branch:** `main`
 **Last updated:** 2026-05-18
 **Coverage:** 92.6% (Stage 13 대비 +2.6%p)
+**Tag:** `v1.1.0`
 
 ---
 
@@ -276,6 +277,81 @@ Update this file at the start and end of every stage.
 
 - `go test -race ./...` — **0 data races, all tests pass**.
 - `golangci-lint run ./...` — **0 issues**.
+
+---
+
+### Stage 14 — Error Handling Hardening (completed)
+
+- **`errors.go`**: `ErrorPolicy` type + constants (`ErrorPolicyFailFast` / `ErrorPolicyContinueOnError`).
+  `WithErrorPolicy` functional option added to `NewDagWithOptions`.
+- **`runner.go` (`execute`)**: Returns `*NodeError{NodeID, Phase:"execute", Err:ErrNoRunner}`.
+  `errors.Is(err, ErrNoRunner)` and `errors.As(err, &*NodeError{})` both work.
+- **`dag.go` (`DagConfig`)**: `ErrorPolicy ErrorPolicy` field added.
+- **`dag.go` (`ErrCount()`)**: New method — `len(dag.Errors.GetChannel())` snapshot.
+- **`dag.go` (`connectRunner`)**: Policy-aware `CheckParentsStatus` skip: only under `FailFast`.
+- **`node.go` (`preFlight`)**: Snapshots `ErrorPolicy` before goroutine loop; treats `Failed`
+  parent as non-error under `ContinueOnError`.
+- **Tests**: `TestErrNoRunner_Structured`, `TestErrCount_Basic`, `TestErrorPolicy_ContinueOnError`,
+  `TestErrorPolicy_FailFast_Default`, coverage path completions.
+- **Coverage**: 90.0% → **92.6%** (+2.6%p).
+- `go test -race ./...` — **0 data races, all tests pass**.
+
+### Stage 15 — DAG Execution Lifecycle Stabilization (completed)
+
+#### Task 1 — startTrigger lifecycle refactor
+- **`dag.go` (`Dag`)**: Added `startTrigger *SafeChannel[runningStatus]` field (guarded by `dag.mu`).
+  Nil until `GetReadyE` captures it; cleared by `reset()`.
+- **`dag.go` (`GetReadyE`)**: Structural invariant check (`startNode.parentVertex` length) moved
+  **before** any goroutine is launched — failure leaves the DAG quiescent with no cleanup needed.
+  `dag.startTrigger = dag.startNode.parentVertex[0]` captured after validation.
+  `dag.running.Store(true)` moved before goroutine loop so Reset is blocked from first spawn.
+- **`dag.go` (`StartE`)**: Rewrites to use `dag.startTrigger` exclusively via `dag.mu.RLock()`
+  snapshot — never reads `startNode.parentVertex` while goroutines are live.
+- **Tests**: `TestGetReadyE_UnexpectedStartParentVertex`, `TestStartE_TriggerSendFails` updated.
+
+#### Task 2 — Topology-frozen guardrails
+- **`AddEdge`, `AddEdgeIfNodesExist`, `FinishDag`**: Return error when `dag.nodeResult != nil`
+  (DAG is frozen after GetReady until Reset).
+- **Tests**: `TestAddEdge_AfterGetReady`, `TestCopyDag_HasNilStartTrigger`,
+  `TestReset_ClearsStartTrigger`.
+
+#### Task 3 — Reset window elimination
+- **`Wait` defer**: Order changed to `nodeWg.Wait → closeChannels → running=false`.
+  `closeChannels` now completes before `running` is cleared, preventing Reset from creating
+  new channels while old ones are still being released.
+- **`Reset` / `ResetE`**: `dag.mu.Lock()` acquired **before** `running.Load()` check,
+  eliminating the TOCTOU window between the check and the lock.
+
+#### Task 4 — ConnectRunnerE re-call guard
+- **`ConnectRunnerE`**: Upgraded from `dag.mu.RLock()` to `dag.mu.Lock()`.
+  Returns error if `dag.nodeResult != nil || dag.running.Load()` — runner closures must not
+  be replaced while goroutines are live (data race risk).
+- **Test**: `TestConnectRunnerE_AfterGetReady_ReturnsError`.
+
+#### Task 5 — Runner / config mutation policy
+- **`SetContainerCmd`, `SetRunnerResolver`, `SetNodeRunner`, `SetNodeRunners`**: All guarded by
+  `dag.nodeResult != nil || dag.running.Load()` (frozen sentinel covers GetReady→Reset window).
+  - `SetNodeRunner`: frozen check moved inside `dag.mu.RLock()` so `nodeResult` is read safely.
+  - `SetNodeRunners`: frozen check moved inside existing `dag.mu.RLock()`.
+  - Error messages use "DAG is frozen after GetReady" (accurate across both sub-windows).
+- **Godoc**: Mutation policy documented on all four setters.
+- **Wait defer comment**: "LIFO" framing removed; each step's sequencing rationale documented.
+- **Tests**: `TestSetContainerCmd_FrozenAfterGetReady`, `TestSetRunnerResolver_FrozenAfterGetReady`,
+  `TestSetNodeRunner_FrozenAfterGetReady`, `TestSetNodeRunners_FrozenAfterGetReady`,
+  `TestSetters_UnfrozenAfterReset` — each verifies both frozen windows (running + post-Wait/pre-Reset).
+
+#### Summary
+| Invariant | Before | After |
+|---|---|---|
+| `startTrigger` nil while goroutines live | ✗ (parentVertex read in StartE) | ✓ captured before goroutines |
+| Topology immutable after GetReady | ✗ | ✓ AddEdge / FinishDag guarded |
+| Runner mutation blocked after GetReady | ✗ | ✓ all 4 setters guarded |
+| Reset cannot race closeChannels | ✗ | ✓ running cleared after closeChannels |
+| Reset lock-then-check (no TOCTOU) | ✗ | ✓ mu.Lock before running.Load |
+| Frozen window: post-Wait / pre-Reset | ✗ | ✓ nodeResult sentinel covers window |
+
+- `go test ./...` — **all tests pass**.
+- `go test -race ./...` — **0 data races detected**.
 
 ---
 
