@@ -353,14 +353,19 @@ func InitDag() (*Dag, error) {
 // SetContainerCmd sets the global default Runnable for all nodes in this DAG.
 // It is safe to call concurrently.  Per-node overrides (SetNodeRunner) and the
 // RunnerResolver take priority over this value; see runner priority in the README.
+//
+// Mutation policy: SetContainerCmd must be called before GetReady.  Calling it
+// after GetReady is a no-op and logs an error; doing so would cause different
+// nodes to execute with different runners depending on scheduling order, breaking
+// reproducibility.  Call Reset before changing the global runner for the next run.
 func (dag *Dag) SetContainerCmd(r Runnable) {
-	// dag.ContainerCmd = r
-
-	// 수정
 	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	if dag.running.Load() {
+		Log.Error("SetContainerCmd: called while DAG is running; ignoring — call Reset first")
+		return
+	}
 	dag.ContainerCmd = r
-	dag.mu.Unlock()
-
 }
 
 // loadDefaultRunnerAtomic 추가
@@ -376,13 +381,20 @@ func (dag *Dag) SetContainerCmd(r Runnable) {
 // The resolver is called at execution time for each node, after the per-node
 // atomic override is checked but before the global ContainerCmd fallback.
 // Pass nil to clear a previously installed resolver.  Thread-safe.
+//
+// Mutation policy: SetRunnerResolver must be called before GetReady.  Calling it
+// after GetReady is a no-op and logs an error for the same reproducibility
+// reason as SetContainerCmd — resolver changes mid-run would make node
+// execution non-deterministic.  Call Reset before changing the resolver for
+// the next run.
 func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
-	// dag.runnerResolver = rr
-
-	// 수정
 	dag.mu.Lock()
+	defer dag.mu.Unlock()
+	if dag.running.Load() {
+		Log.Error("SetRunnerResolver: called while DAG is running; ignoring — call Reset first")
+		return
+	}
 	dag.runnerResolver = rr
-	dag.mu.Unlock()
 }
 
 // 원자적으로 Resolver 반환
@@ -397,8 +409,18 @@ func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
 } */
 
 // SetNodeRunner sets the runner for the node with the given id.
-// Returns false if the node does not exist or is not in Pending status.
+// Returns false if the node does not exist, is not in Pending status, or if
+// GetReady has already been called.
+//
+// Mutation policy: SetNodeRunner must be called before GetReady.  After GetReady,
+// goroutines are live and node runners must not change — a mid-run change could
+// cause a node that has not yet entered inFlight to execute with a different
+// runner than intended, breaking reproducibility.  Call Reset first.
 func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
+	if dag.running.Load() {
+		Log.Errorf("SetNodeRunner: called while DAG is running; ignoring node %s — call Reset first", id)
+		return false
+	}
 	dag.mu.RLock()
 	n := dag.nodes[id]
 	dag.mu.RUnlock()
@@ -428,7 +450,18 @@ func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
 
 // SetNodeRunners bulk-sets runners from a map of node-id to Runnable.
 // Returns the count of applied runners, and slices of missing/skipped node ids.
+//
+// Mutation policy: SetNodeRunners must be called before GetReady.  If called
+// after GetReady, all ids are added to the skipped slice, applied is 0, and
+// an error is logged.  Call Reset before changing runners for the next run.
 func (dag *Dag) SetNodeRunners(m map[string]Runnable) (applied int, missing, skipped []string) {
+	if dag.running.Load() {
+		Log.Error("SetNodeRunners: called while DAG is running; ignoring all entries — call Reset first")
+		for id := range m {
+			skipped = append(skipped, id)
+		}
+		return 0, nil, skipped
+	}
 	dag.mu.RLock()
 	defer dag.mu.RUnlock()
 

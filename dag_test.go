@@ -4327,3 +4327,41 @@ func TestReset_ClearsStartTrigger(t *testing.T) {
 		t.Error("startTrigger must be nil after Reset")
 	}
 }
+
+// TestConnectRunnerE_AfterGetReady_ReturnsError verifies that ConnectRunnerE
+// returns an error when called after GetReadyE has succeeded (goroutines are
+// live; replacing runner closures at that point would cause a data race).
+func TestConnectRunnerE_AfterGetReady_ReturnsError(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+
+	// ConnectRunnerE after GetReady must return an error.
+	if err := d.ConnectRunnerE(); err == nil {
+		t.Error("ConnectRunnerE after GetReady should return an error")
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+}
