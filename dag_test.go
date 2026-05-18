@@ -4217,3 +4217,114 @@ func TestErrorPolicy_FailFast_Default(t *testing.T) {
 		t.Errorf("node B should not have Succeeded under FailFast, got %v", st)
 	}
 }
+
+// TestAddEdge_AfterGetReady verifies that AddEdge returns an error when called
+// after GetReadyE has succeeded (topology is frozen until Reset).
+func TestAddEdge_AfterGetReady(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+
+	// Attempt to mutate topology after GetReady — must be rejected.
+	if err := d.AddEdge("A", "B"); err == nil {
+		t.Error("AddEdge after GetReady should return an error (topology is frozen)")
+	}
+	if err := d.AddEdgeIfNodesExist("A", "B"); err == nil {
+		t.Error("AddEdgeIfNodesExist after GetReady should return an error (topology is frozen)")
+	}
+	if err := d.FinishDag(); err == nil {
+		t.Error("FinishDag after GetReady should return an error (topology is frozen)")
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+}
+
+// TestCopyDag_HasNilStartTrigger verifies that CopyDag produces a copy with a
+// nil startTrigger — the copy must go through GetReadyE independently to
+// capture a valid trigger channel.
+func TestCopyDag_HasNilStartTrigger(t *testing.T) {
+	Log.SetOutput(io.Discard)
+
+	original, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := original.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := original.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	copied := CopyDag(original, "copy-nil-trigger")
+	if copied == nil {
+		t.Fatal("CopyDag returned nil")
+	}
+	if copied.startTrigger != nil {
+		t.Error("CopyDag: startTrigger must be nil on a fresh copy — it is captured by GetReadyE")
+	}
+}
+
+// TestReset_ClearsStartTrigger verifies that Reset sets startTrigger back to
+// nil so the next GetReadyE call re-captures it from the freshly-wired channel.
+func TestReset_ClearsStartTrigger(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	// After GetReady, startTrigger must be non-nil.
+	if d.startTrigger == nil {
+		t.Error("startTrigger should be non-nil after GetReady")
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+
+	d.Reset()
+	// After Reset, startTrigger must be nil — GetReadyE will re-capture it.
+	if d.startTrigger != nil {
+		t.Error("startTrigger must be nil after Reset")
+	}
+}

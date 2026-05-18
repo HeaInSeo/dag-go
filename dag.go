@@ -926,6 +926,11 @@ func (dag *Dag) AddEdge(from, to string) error {
 		return err
 	}
 
+	// Topology is frozen once GetReadyE has succeeded (nodeResult is non-nil).
+	// Mutations are not permitted until Reset is called.
+	if dag.nodeResult != nil {
+		return logErr(fmt.Errorf("AddEdge: DAG topology is frozen after GetReady; call Reset before modifying the graph"))
+	}
 	if dag.validated {
 		return logErr(fmt.Errorf("DAG is already finalized: AddEdge is not allowed after FinishDag"))
 	}
@@ -1011,6 +1016,11 @@ func (dag *Dag) AddEdgeIfNodesExist(from, to string) error {
 		return err
 	}
 
+	// Topology is frozen once GetReadyE has succeeded (nodeResult is non-nil).
+	// Mutations are not permitted until Reset is called.
+	if dag.nodeResult != nil {
+		return logErr(fmt.Errorf("AddEdgeIfNodesExist: DAG topology is frozen after GetReady; call Reset before modifying the graph"))
+	}
 	if dag.validated {
 		return logErr(fmt.Errorf("DAG is already finalized: AddEdgeIfNodesExist is not allowed after FinishDag"))
 	}
@@ -1109,6 +1119,11 @@ func (dag *Dag) FinishDag() error {
 		return err
 	}
 
+	// Topology is frozen once GetReadyE has succeeded (nodeResult is non-nil).
+	// Mutations are not permitted until Reset is called.
+	if dag.nodeResult != nil {
+		return logErr(fmt.Errorf("FinishDag: DAG topology is frozen after GetReady; call Reset before modifying the graph"))
+	}
 	// 이미 검증이 완료된 경우
 	if dag.validated {
 		return logErr(fmt.Errorf("validated is already set to true"))
