@@ -168,7 +168,10 @@ func (e *NodeError) Unwrap() error {
 // parentReceiverFunc returns the errgroup worker that waits for one parent channel.
 // Returns nil when the parent signals a non-Failed status, or when policy is
 // ContinueOnError. Returns an error on Failed+FailFast or context cancellation.
-func parentReceiverFunc(egCtx context.Context, nodeID string, k int, sc *SafeChannel[runningStatus], policy ErrorPolicy, pprofEnabled bool) func() error {
+func parentReceiverFunc(
+	egCtx context.Context, nodeID string, k int,
+	sc *SafeChannel[runningStatus], policy ErrorPolicy, pprofEnabled bool,
+) func() error {
 	return func() error {
 		applyPreflightLabels(egCtx, pprofEnabled, nodeID, k)
 		select {
