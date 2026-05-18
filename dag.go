@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/HeaInSeo/utils"
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -102,6 +102,12 @@ type DagConfig struct {
 	// ErrorPolicyContinueOnError allows children to run regardless of parent outcome;
 	// errors are still recorded in the Errors channel and DroppedErrors counter.
 	ErrorPolicy ErrorPolicy
+
+	// EnablePprofLabels attaches runtime/pprof goroutine labels to each preFlight
+	// worker goroutine ("phase", "nodeId", "channelIndex").
+	// Only effective when the binary is built with -tags pprof.
+	// Default: false — zero allocation overhead in production builds.
+	EnablePprofLabels bool
 }
 
 // DagOption is a functional-option type for NewDagWithOptions.

@@ -3,8 +3,6 @@ package dag_go
 import (
 	"context"
 	"fmt"
-	"runtime/pprof"
-	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -170,11 +168,9 @@ func (e *NodeError) Unwrap() error {
 // parentReceiverFunc returns the errgroup worker that waits for one parent channel.
 // Returns nil when the parent signals a non-Failed status, or when policy is
 // ContinueOnError. Returns an error on Failed+FailFast or context cancellation.
-func parentReceiverFunc(egCtx context.Context, nodeID string, k int, sc *SafeChannel[runningStatus], policy ErrorPolicy) func() error {
+func parentReceiverFunc(egCtx context.Context, nodeID string, k int, sc *SafeChannel[runningStatus], policy ErrorPolicy, pprofEnabled bool) func() error {
 	return func() error {
-		pprof.SetGoroutineLabels(pprof.WithLabels(egCtx,
-			pprof.Labels("phase", "preFlight", "nodeId", nodeID, "channelIndex", strconv.Itoa(k)),
-		))
+		applyPreflightLabels(egCtx, pprofEnabled, nodeID, k)
 		select {
 		case result := <-sc.GetChannel():
 			if result == Failed && policy == ErrorPolicyFailFast {
@@ -207,12 +203,14 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 	// the node's execution budget. See connectRunner for where timeouts are applied.
 	eg, egCtx := errgroup.WithContext(ctx)
 
-	// Snapshot the policy before launching goroutines.
+	// Snapshot config values before launching goroutines.
 	// With ContinueOnError, a Failed parent signal is not treated as a preFlight
 	// error — the child always proceeds to inFlight regardless of parent outcome.
 	policy := ErrorPolicyFailFast
+	pprofEnabled := false
 	if n.parentDag != nil {
 		policy = n.parentDag.Config.ErrorPolicy
+		pprofEnabled = n.parentDag.Config.EnablePprofLabels
 	}
 
 	for k, sc := range n.parentVertex {
@@ -228,7 +226,7 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 			})
 			break
 		}
-		eg.Go(parentReceiverFunc(egCtx, n.ID, k, sc, policy))
+		eg.Go(parentReceiverFunc(egCtx, n.ID, k, sc, policy, pprofEnabled))
 	}
 
 	err := eg.Wait()
