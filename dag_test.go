@@ -4365,3 +4365,173 @@ func TestConnectRunnerE_AfterGetReady_ReturnsError(t *testing.T) {
 	d.Start()   //nolint:errcheck
 	d.Wait(ctx) //nolint:errcheck
 }
+
+// ── runner/config freeze policy tests ────────────────────────────────────────
+//
+// Each test verifies two frozen windows:
+//   a) after GetReady (running=true, nodeResult!=nil)
+//   b) after Wait but before Reset (running=false, nodeResult!=nil)
+//
+// The DAG is only truly unfrozen once reset() clears nodeResult.
+
+// buildFrozenDag returns a started DAG (GetReady called, not yet Start/Wait).
+// The caller is responsible for calling Start + Wait + cleanup.
+func buildFrozenDag(t *testing.T) (*Dag, context.Context, context.CancelFunc) {
+	t.Helper()
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := d.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	if err := d.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if !d.GetReady(ctx) {
+		cancel()
+		t.Fatal("GetReady failed")
+	}
+	return d, ctx, cancel
+}
+
+// TestSetContainerCmd_FrozenAfterGetReady verifies that SetContainerCmd is a
+// no-op both while running and after Wait (before Reset).
+func TestSetContainerCmd_FrozenAfterGetReady(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, ctx, cancel := buildFrozenDag(t)
+	defer cancel()
+
+	sentinel := NoopCmd{}
+	original := d.ContainerCmd
+
+	// Window a: after GetReady (running=true).
+	d.SetContainerCmd(sentinel)
+	if d.ContainerCmd != original {
+		t.Error("SetContainerCmd must be no-op after GetReady (running=true)")
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+
+	// Window b: after Wait, before Reset (running=false, nodeResult!=nil).
+	d.SetContainerCmd(sentinel)
+	if d.ContainerCmd != original {
+		t.Error("SetContainerCmd must be no-op after Wait (nodeResult still non-nil)")
+	}
+}
+
+// TestSetRunnerResolver_FrozenAfterGetReady verifies that SetRunnerResolver is
+// a no-op both while running and after Wait (before Reset).
+func TestSetRunnerResolver_FrozenAfterGetReady(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, ctx, cancel := buildFrozenDag(t)
+	defer cancel()
+
+	resolver := RunnerResolver(func(*Node) Runnable { return NoopCmd{} })
+
+	// Window a: after GetReady.
+	d.SetRunnerResolver(resolver)
+	if d.runnerResolver != nil {
+		t.Error("SetRunnerResolver must be no-op after GetReady (running=true)")
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+
+	// Window b: after Wait, before Reset.
+	d.SetRunnerResolver(resolver)
+	if d.runnerResolver != nil {
+		t.Error("SetRunnerResolver must be no-op after Wait (nodeResult still non-nil)")
+	}
+}
+
+// TestSetNodeRunner_FrozenAfterGetReady verifies that SetNodeRunner returns
+// false both while running and after Wait (before Reset).
+func TestSetNodeRunner_FrozenAfterGetReady(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, ctx, cancel := buildFrozenDag(t)
+	defer cancel()
+
+	// Window a: after GetReady.
+	if d.SetNodeRunner("A", NoopCmd{}) {
+		t.Error("SetNodeRunner must return false after GetReady (running=true)")
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+
+	// Window b: after Wait, before Reset.
+	if d.SetNodeRunner("A", NoopCmd{}) {
+		t.Error("SetNodeRunner must return false after Wait (nodeResult still non-nil)")
+	}
+}
+
+// TestSetNodeRunners_FrozenAfterGetReady verifies that SetNodeRunners returns
+// all entries as skipped both while running and after Wait (before Reset).
+func TestSetNodeRunners_FrozenAfterGetReady(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, ctx, cancel := buildFrozenDag(t)
+	defer cancel()
+
+	input := map[string]Runnable{"A": NoopCmd{}}
+
+	// Window a: after GetReady.
+	applied, _, skipped := d.SetNodeRunners(input)
+	if applied != 0 || len(skipped) != 1 {
+		t.Errorf("SetNodeRunners after GetReady: want applied=0 skipped=1, got applied=%d skipped=%d", applied, len(skipped))
+	}
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+
+	// Window b: after Wait, before Reset.
+	applied, _, skipped = d.SetNodeRunners(input)
+	if applied != 0 || len(skipped) != 1 {
+		t.Errorf("SetNodeRunners after Wait: want applied=0 skipped=1, got applied=%d skipped=%d", applied, len(skipped))
+	}
+}
+
+// TestSetters_UnfrozenAfterReset verifies that all four setters become
+// functional again once Reset has been called.
+func TestSetters_UnfrozenAfterReset(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, ctx, cancel := buildFrozenDag(t)
+	defer cancel()
+
+	d.Start()   //nolint:errcheck
+	d.Wait(ctx) //nolint:errcheck
+	d.Reset()
+
+	// After Reset, nodeResult==nil and running==false → all setters must work.
+	d.SetContainerCmd(NoopCmd{})
+	if d.ContainerCmd == nil {
+		t.Error("SetContainerCmd must succeed after Reset")
+	}
+	d.SetRunnerResolver(func(*Node) Runnable { return NoopCmd{} })
+	if d.runnerResolver == nil {
+		t.Error("SetRunnerResolver must succeed after Reset")
+	}
+	if !d.SetNodeRunner("A", NoopCmd{}) {
+		t.Error("SetNodeRunner must return true after Reset (node is Pending)")
+	}
+	applied, _, _ := d.SetNodeRunners(map[string]Runnable{"A": NoopCmd{}})
+	if applied != 1 {
+		t.Errorf("SetNodeRunners must apply 1 runner after Reset, got %d", applied)
+	}
+}

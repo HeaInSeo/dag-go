@@ -354,15 +354,18 @@ func InitDag() (*Dag, error) {
 // It is safe to call concurrently.  Per-node overrides (SetNodeRunner) and the
 // RunnerResolver take priority over this value; see runner priority in the README.
 //
-// Mutation policy: SetContainerCmd must be called before GetReady.  Calling it
-// after GetReady is a no-op and logs an error; doing so would cause different
-// nodes to execute with different runners depending on scheduling order, breaking
-// reproducibility.  Call Reset before changing the global runner for the next run.
+// Mutation policy: SetContainerCmd must be called before GetReady and must not
+// be called again until Reset.  The DAG is considered frozen from the moment
+// GetReadyE succeeds until reset() clears nodeResult — this covers both the
+// running window (goroutines live) and the post-Wait / pre-Reset window.
+// Mutating the global runner inside the frozen window would cause different nodes
+// to execute with different runners depending on scheduling order, breaking
+// reproducibility.
 func (dag *Dag) SetContainerCmd(r Runnable) {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
-	if dag.running.Load() {
-		Log.Error("SetContainerCmd: called while DAG is running; ignoring — call Reset first")
+	if dag.nodeResult != nil || dag.running.Load() {
+		Log.Error("SetContainerCmd: DAG is frozen after GetReady; ignoring — call Reset first")
 		return
 	}
 	dag.ContainerCmd = r
@@ -382,16 +385,14 @@ func (dag *Dag) SetContainerCmd(r Runnable) {
 // atomic override is checked but before the global ContainerCmd fallback.
 // Pass nil to clear a previously installed resolver.  Thread-safe.
 //
-// Mutation policy: SetRunnerResolver must be called before GetReady.  Calling it
-// after GetReady is a no-op and logs an error for the same reproducibility
-// reason as SetContainerCmd — resolver changes mid-run would make node
-// execution non-deterministic.  Call Reset before changing the resolver for
-// the next run.
+// Mutation policy: same as SetContainerCmd — must be called before GetReady and
+// not again until Reset.  The frozen window spans from GetReadyE success through
+// Reset; changing the resolver inside it would break reproducibility.
 func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
 	dag.mu.Lock()
 	defer dag.mu.Unlock()
-	if dag.running.Load() {
-		Log.Error("SetRunnerResolver: called while DAG is running; ignoring — call Reset first")
+	if dag.nodeResult != nil || dag.running.Load() {
+		Log.Error("SetRunnerResolver: DAG is frozen after GetReady; ignoring — call Reset first")
 		return
 	}
 	dag.runnerResolver = rr
@@ -409,21 +410,22 @@ func (dag *Dag) SetRunnerResolver(rr RunnerResolver) {
 } */
 
 // SetNodeRunner sets the runner for the node with the given id.
-// Returns false if the node does not exist, is not in Pending status, or if
-// GetReady has already been called.
+// Returns false if the node does not exist, is not in Pending status, or if the
+// DAG is frozen (GetReady has been called and Reset has not yet been called).
 //
-// Mutation policy: SetNodeRunner must be called before GetReady.  After GetReady,
-// goroutines are live and node runners must not change — a mid-run change could
-// cause a node that has not yet entered inFlight to execute with a different
-// runner than intended, breaking reproducibility.  Call Reset first.
+// Mutation policy: same as SetContainerCmd — must be called before GetReady and
+// not again until Reset.  The frozen window spans from GetReadyE success through
+// Reset.
 func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
-	if dag.running.Load() {
-		Log.Errorf("SetNodeRunner: called while DAG is running; ignoring node %s — call Reset first", id)
-		return false
-	}
 	dag.mu.RLock()
 	n := dag.nodes[id]
+	frozen := dag.nodeResult != nil || dag.running.Load()
 	dag.mu.RUnlock()
+
+	if frozen {
+		Log.Errorf("SetNodeRunner: DAG is frozen after GetReady; ignoring node %s — call Reset first", id)
+		return false
+	}
 	if n == nil {
 		return false
 	}
@@ -451,19 +453,20 @@ func (dag *Dag) SetNodeRunner(id string, r Runnable) bool {
 // SetNodeRunners bulk-sets runners from a map of node-id to Runnable.
 // Returns the count of applied runners, and slices of missing/skipped node ids.
 //
-// Mutation policy: SetNodeRunners must be called before GetReady.  If called
-// after GetReady, all ids are added to the skipped slice, applied is 0, and
-// an error is logged.  Call Reset before changing runners for the next run.
+// Mutation policy: same as SetContainerCmd — must be called before GetReady and
+// not again until Reset.  When the DAG is frozen all ids are returned in the
+// skipped slice with applied == 0.
 func (dag *Dag) SetNodeRunners(m map[string]Runnable) (applied int, missing, skipped []string) {
-	if dag.running.Load() {
-		Log.Error("SetNodeRunners: called while DAG is running; ignoring all entries — call Reset first")
+	dag.mu.RLock()
+	defer dag.mu.RUnlock()
+
+	if dag.nodeResult != nil || dag.running.Load() {
+		Log.Error("SetNodeRunners: DAG is frozen after GetReady; ignoring all entries — call Reset first")
 		for id := range m {
 			skipped = append(skipped, id)
 		}
 		return 0, nil, skipped
 	}
-	dag.mu.RLock()
-	defer dag.mu.RUnlock()
 
 	for id, r := range m {
 		// 실행 노드가 아닌 특수 노드 방어
@@ -1530,11 +1533,16 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 		return false
 	}
 
-	// Cleanup (LIFO order of defer):
-	//   1. wait for all per-node goroutines to exit
-	//   2. close all channels (must happen before running=false so Reset cannot
-	//      race against closeChannels creating new channels on old memory)
-	//   3. clear the running flag so Reset() is safe to call
+	// Cleanup: three sequential steps inside one defer; order is significant.
+	//   1. nodeWg.Wait    — block until every per-node goroutine has exited.
+	//   2. closeChannels  — release all channel resources; must run before
+	//                       running is cleared so Reset (which gates on
+	//                       running==false) cannot create new channels while
+	//                       closeChannels is still releasing old ones.
+	//   3. running=false  — signal that Reset is now safe.
+	//                       nodeResult stays non-nil until reset() clears it,
+	//                       so the DAG remains frozen (setter guards reject
+	//                       changes) until the caller explicitly calls Reset.
 	defer func() {
 		dag.nodeWg.Wait()
 		dag.closeChannels()
