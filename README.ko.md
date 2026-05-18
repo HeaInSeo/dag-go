@@ -1,14 +1,12 @@
 # dag-go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/seoyhaein/dag-go.svg)](https://pkg.go.dev/github.com/seoyhaein/dag-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/seoyhaein/dag-go)](https://goreportcard.com/report/github.com/seoyhaein/dag-go)
-[![CodeFactor](https://www.codefactor.io/repository/github/seoyhaein/dag-go/badge/main)](https://www.codefactor.io/repository/github/seoyhaein/dag-go/overview/main)
+[![Tests](https://github.com/HeaInSeo/dag-go/actions/workflows/test.yml/badge.svg)](https://github.com/HeaInSeo/dag-go/actions/workflows/test.yml)
+[![Lint](https://github.com/HeaInSeo/dag-go/actions/workflows/lint.yml/badge.svg)](https://github.com/HeaInSeo/dag-go/actions/workflows/lint.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/HeaInSeo/dag-go.svg)](https://pkg.go.dev/github.com/HeaInSeo/dag-go)
 
 **dag-go**는 순수 Go로 작성된 동시성 DAG(방향 비순환 그래프) 실행 엔진입니다.
 태스크를 노드로, 의존 관계를 방향 엣지로 정의하면 전체 그래프를 동시에 실행합니다.
 컨텍스트 취소, 노드별 타임아웃, 사이클 감지, 원자적 상태 전이를 기본 제공합니다.
-
-> **API 레퍼런스:** [pkg.go.dev/github.com/seoyhaein/dag-go](https://pkg.go.dev/github.com/seoyhaein/dag-go)
 
 English documentation: [README.md](README.md)
 
@@ -21,23 +19,25 @@ English documentation: [README.md](README.md)
 | **순수 Go** | Kubernetes·외부 프레임워크 의존 없음. stdlib + 최소 의존성 |
 | **컨텍스트 연동** | 모든 `Runnable.RunE`에 `context.Context` 전달; 취소 시그널이 그래프 전체로 전파 |
 | **데드락 안전 동시성 캡** | `WorkerPoolSize`는 RunE 실행(`inFlight`)만 제한. 의존성 대기(`preFlight`)는 슬롯을 점유하지 않아 어떤 값이어도 데드락 불가 |
-| **그래프 봉인** | `FinishDag()` 성공 후 `AddEdge`/`CreateNode` 호출 시 에러 반환 |
+| **라이프사이클 가드레일** | `FinishDag()` 성공 후 `AddEdge`/`SetContainerCmd`/`SetNodeRunner` 호출 시 에러 반환 |
 | **원자적 `FinishDag`** | 사이클 감지가 구조 변경 이전에 실행; 실패 시 DAG 상태 불변 |
 | **사이클 감지** | DFS 기반, `ErrCycleDetected` 센티넬 반환 (`errors.Is` 호환) |
 | **원자적 상태 전이** | `TransitionStatus(from, to)` CAS로 잘못된 상태 전이 방지 |
 | **노드별/DAG 수준 타임아웃** | `Node.Timeout` 또는 `DagConfig.DefaultTimeout`; 타임아웃은 실행 슬롯 획득 후부터 카운트 |
+| **에러 정책** | `FailFast`(기본) 또는 `ContinueOnError`; 런타임 에러는 `Dag.Errors` 채널에 기록 |
 | **SafeChannel\[T\]** | 제네릭 동시성 안전 채널 래퍼, double-close 패닉 방지 |
 | **고루틴 누수 검증** | 모든 테스트에서 `goleak`으로 고루틴 누수 0건 확인 |
+| **Reset & 재시도** | `Reset()`으로 실행 상태 초기화; 같은 토폴로지를 새 러너로 재실행 가능 |
 
 ---
 
 ## 설치
 
 ```bash
-go get github.com/seoyhaein/dag-go
+go get github.com/HeaInSeo/dag-go
 ```
 
-**Go 1.22 이상** 필요.
+**Go 1.25 이상** 필요.
 
 ---
 
@@ -52,7 +52,7 @@ import (
     "fmt"
     "time"
 
-    dag "github.com/seoyhaein/dag-go"
+    dag "github.com/HeaInSeo/dag-go"
 )
 
 type MyRunner struct{ label string }
@@ -122,7 +122,7 @@ InitDag() / StartDag()       시작 노드 생성
 AddEdge(from, to)             부모 → 자식 의존성 등록
         │
 FinishDag()                   유효성 검사 → 사이클 감지 → 그래프 봉인
-        │                     ← 이후 AddEdge / CreateNode 거부
+        │                     ← 이후 AddEdge / CreateNode / SetContainerCmd 거부
 ConnectRunner()               각 노드에 러너 클로저 연결
         │
 GetReady(ctx)                 실행 세마포어 초기화, 노드별 고루틴 실행
@@ -130,6 +130,8 @@ GetReady(ctx)                 실행 세마포어 초기화, 노드별 고루틴
 Start()                       시작 노드에 트리거 신호 전송
         │
 Wait(ctx)                     모든 노드 상태 스트림 fan-in, 성공 시 true 반환
+        │
+Reset()                       실행 상태 초기화; 토폴로지 보존, 재실행 가능
 ```
 
 ---
@@ -143,7 +145,7 @@ Wait(ctx)                     모든 노드 상태 스트림 fan-in, 성공 시 
 stateDiagram-v2
     [*] --> Pending : 노드 생성
     Pending --> Running  : 부모 노드 모두 완료
-    Pending --> Skipped  : 부모 노드 실패
+    Pending --> Skipped  : 부모 노드 실패 (FailFast 정책)
     Running --> Succeeded : RunE가 nil 반환
     Running --> Failed    : RunE 에러 또는 타임아웃
     Succeeded --> [*]
@@ -163,6 +165,7 @@ cfg := dag.DagConfig{
                                         // (노드 수보다 작아도 데드락 없음 — 아래 참조)
     DefaultTimeout:    0,               // 노드별 RunE 타임아웃; 0 = 제한 없음
     ErrorDrainTimeout: 5 * time.Second, // collectErrors의 최대 드레인 대기 시간
+    ErrorPolicy:       dag.FailFast,    // 또는 dag.ContinueOnError
 }
 d := dag.NewDagWithConfig(cfg)
 
@@ -187,22 +190,22 @@ WorkerPoolSize = 1, 체인 DAG (start → A → B → C → end):
 ```
 
 `Node.Timeout` / `DefaultTimeout`의 타임아웃 카운트는 슬롯 획득 **이후**부터 시작됩니다.
-슬롯 대기 시간이 실행 budget을 소모하지 않습니다.
 
 ---
 
-## 그래프 봉인
+## 라이프사이클 가드레일
 
-`FinishDag()` 성공 이후 그래프는 봉인됩니다:
+`FinishDag()` 성공 이후 그래프와 러너 설정은 동결됩니다:
 
 ```go
-d.FinishDag()             // 봉인 완료
-d.AddEdge("X", "Y")      // 에러 반환: "DAG is already finalized"
-d.CreateNode("Z")         // nil 반환
+d.FinishDag()                  // 봉인 완료
+d.AddEdge("X", "Y")            // 에러: topology frozen after GetReady
+d.SetContainerCmd(r)           // no-op + 에러 로그: frozen after GetReady
+d.SetNodeRunner("n", r)        // no-op + 에러 로그: frozen after GetReady
 ```
 
-`FinishDag()`가 실패한 경우(예: 사이클 감지) DAG 상태는 변경되지 않습니다.
-`EndNode`가 추가되지 않고 엣지도 수정되지 않으므로, 그래프를 수정한 뒤 재시도할 수 있습니다.
+동결 구간은 `GetReady` 성공 시점부터 `Reset` 호출까지입니다.
+`FinishDag()`가 실패한 경우(예: 사이클 감지) DAG 상태는 변경되지 않으므로 수정 후 재시도 가능합니다.
 
 ---
 
@@ -244,19 +247,64 @@ if err := d.FinishDag(); err != nil {
 `dag_id`, `error` 필드가 포함된 구조화 logrus 로그로 출력됩니다.
 `DroppedErrors()`로 에러 채널 백프레셔를 모니터링할 수 있습니다.
 
+노드 수준 에러는 `*NodeError`로 표면화됩니다(`errors.Is`, `errors.As` 모두 지원):
+
+```go
+var nodeErr *dag.NodeError
+if errors.As(err, &nodeErr) {
+    fmt.Println(nodeErr.NodeID, nodeErr.Phase)
+}
+```
+
+---
+
+## Reset & 재시도
+
+```go
+d.Wait(ctx)           // 완료; DAG 동결 (running=false, nodeResult!=nil)
+d.Reset()             // 실행 상태 초기화, 토폴로지 보존
+d.ConnectRunner()     // 러너 재연결 (필요 시 새 러너 설정 후 호출)
+d.GetReady(ctx)
+d.Start()
+d.Wait(ctx)
+```
+
+---
+
+## Mermaid 시각화
+
+```go
+dot := d.ToMermaid()  // FinishDag() 이후 호출
+fmt.Println(dot)
+```
+
+`graph TD` 형식의 Mermaid 플로차트를 출력합니다.
+합성 노드(start/end)는 스타디움 도형으로, 노드별 러너 타입이 등록된 경우 레이블에 포함됩니다.
+
 ---
 
 ## 개발
 
 ```bash
 # 레이스 디텍터 포함 테스트
-go test -race ./...
+make test
 
-# 린트 (golangci-lint v2)
-golangci-lint run ./...
+# 린트 (golangci-lint v2.11.3, 로컬 바이너리)
+make lint
+
+# 커버리지 리포트 (reports/index.html)
+make coverage
+
+# 보안 스캔 (gosec + govulncheck, 수동)
+make lint-security
+make vuln
 ```
 
 **의존성 정책:** `k8s.io/*`, `sigs.k8s.io/*` 임포트 금지 (`depguard` 적용).
+
+**Pages:**
+- 벤치마크 추세: <https://heainseo.github.io/dag-go/dev/bench/>
+- 커버리지 리포트: <https://heainseo.github.io/dag-go/coverage/>
 
 ---
 

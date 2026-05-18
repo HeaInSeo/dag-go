@@ -69,8 +69,8 @@ a comprehensive lifecycle guardrail pass (Stage 15).
 
 ### Test results
 ```
-go test ./...       ok  github.com/seoyhaein/dag-go
-go test -race ./... ok  github.com/seoyhaein/dag-go   (0 data races)
+go test ./...       ok  github.com/HeaInSeo/dag-go
+go test -race ./... ok  github.com/HeaInSeo/dag-go   (0 data races)
 ```
 
 ---

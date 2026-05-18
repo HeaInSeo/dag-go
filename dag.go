@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/seoyhaein/utils"
+	"github.com/HeaInSeo/utils"
 	"golang.org/x/sync/errgroup"
 )
 

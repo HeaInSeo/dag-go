@@ -175,7 +175,7 @@ dag-go 는 독립 라이브러리다. 외부 프레임워크 의존을 최소화
 |---|---|
 | Go 표준 라이브러리 | 모두 허용 |
 | 동시성 확장 | `golang.org/x/sync` |
-| 유틸리티 | `github.com/google/uuid`, `github.com/seoyhaein/utils` |
+| 유틸리티 | `github.com/google/uuid`, `github.com/HeaInSeo/utils` |
 | 로깅 | `github.com/sirupsen/logrus` |
 | 테스트 | `go.uber.org/goleak` |
 

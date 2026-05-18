@@ -1,7 +1,7 @@
 # dag-go v1.0.0 Release Notes
 
 **Release date:** 2026-02-27
-**Go module:** `github.com/seoyhaein/dag-go`
+**Go module:** `github.com/HeaInSeo/dag-go`
 **Minimum Go version:** 1.22
 
 ---
@@ -153,7 +153,7 @@ dag-go is intentionally dependency-light:
 | `golang.org/x/sync` | `errgroup` for `fanIn` |
 | `github.com/google/uuid` | DAG / node ID generation |
 | `github.com/sirupsen/logrus` | structured logging |
-| `github.com/seoyhaein/utils` | string utilities |
+| `github.com/HeaInSeo/utils` | string utilities |
 
 **Prohibited:** `k8s.io/*`, `sigs.k8s.io/*` — dag-go is a pure library with no
 orchestration framework dependencies.
@@ -202,6 +202,6 @@ All tests pass with **0 data races detected** under `-race`.
 
 ## Credits
 
-Developed and maintained by [@seoyhaein](https://github.com/seoyhaein).
+Developed and maintained by [@HeaInSeo](https://github.com/HeaInSeo).
 
-API documentation: <https://pkg.go.dev/github.com/seoyhaein/dag-go>
+API documentation: <https://pkg.go.dev/github.com/HeaInSeo/dag-go>

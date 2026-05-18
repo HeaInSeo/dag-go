@@ -86,12 +86,12 @@ linters:
           allow:
             - "$gostd"
             - "github.com/google/uuid"
-            - "github.com/seoyhaein/utils"
+            - "github.com/HeaInSeo/utils"
             - "github.com/sirupsen/logrus"
             - "go.uber.org/goleak"
             - "golang.org/x/sync"
             - "github.com/dlsniper/debugger"
-            - "github.com/seoyhaein/dag-go"
+            - "github.com/HeaInSeo/dag-go"
 
           # 금지 목록: K8s 의존성은 순수 Go 라이브러리에서 절대 허용하지 않는다.
           deny:

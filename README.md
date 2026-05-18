@@ -1,15 +1,13 @@
 # dag-go
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/seoyhaein/dag-go.svg)](https://pkg.go.dev/github.com/seoyhaein/dag-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/seoyhaein/dag-go)](https://goreportcard.com/report/github.com/seoyhaein/dag-go)
-[![CodeFactor](https://www.codefactor.io/repository/github/seoyhaein/dag-go/badge/main)](https://www.codefactor.io/repository/github/seoyhaein/dag-go/overview/main)
+[![Tests](https://github.com/HeaInSeo/dag-go/actions/workflows/test.yml/badge.svg)](https://github.com/HeaInSeo/dag-go/actions/workflows/test.yml)
+[![Lint](https://github.com/HeaInSeo/dag-go/actions/workflows/lint.yml/badge.svg)](https://github.com/HeaInSeo/dag-go/actions/workflows/lint.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/HeaInSeo/dag-go.svg)](https://pkg.go.dev/github.com/HeaInSeo/dag-go)
 
 **dag-go** is a pure-Go concurrent DAG (Directed Acyclic Graph) execution engine.
 Wire up tasks as nodes, define dependencies as directed edges, and execute the
 entire graph concurrently — with context cancellation, per-node timeouts, cycle
 detection, and atomic state-transition guarantees.
-
-> **API reference:** [pkg.go.dev/github.com/seoyhaein/dag-go](https://pkg.go.dev/github.com/seoyhaein/dag-go)
 
 한국어 문서: [README.ko.md](README.ko.md)
 
@@ -22,23 +20,25 @@ detection, and atomic state-transition guarantees.
 | **Pure Go** | No Kubernetes or framework dependencies; stdlib + a handful of well-scoped modules |
 | **Context-aware execution** | Every `Runnable.RunE` receives `context.Context`; cancellation propagates through the whole graph |
 | **Deadlock-safe concurrency cap** | `WorkerPoolSize` bounds only `inFlight` (RunE); dependency wait (`preFlight`) never holds a slot, so any cap value is safe |
-| **Graph sealing** | `FinishDag()` seals the graph; `AddEdge`/`CreateNode` return an error after sealing |
+| **Lifecycle guardrails** | `FinishDag()` seals the graph; `AddEdge`/`SetContainerCmd`/`SetNodeRunner` return errors after sealing |
 | **Atomic `FinishDag`** | Cycle detection runs before any structural mutation; a failed `FinishDag` leaves the DAG unchanged |
 | **Cycle detection** | DFS-based, returns `ErrCycleDetected` (sentinel, `errors.Is`-compatible) |
 | **Atomic state transitions** | `TransitionStatus(from, to)` CAS guards prevent illegal status overwrites |
 | **Per-node & DAG-level timeouts** | `Node.Timeout` or `DagConfig.DefaultTimeout`; timeout budget starts after acquiring the execution slot |
+| **Error policy** | `FailFast` (default) or `ContinueOnError`; runtime errors land in `Dag.Errors` channel |
 | **SafeChannel\[T\]** | Generic concurrency-safe channel wrapper that prevents double-close panics |
 | **Goroutine-leak tested** | Every test verifies zero goroutine leaks with `goleak` |
+| **Reset & retry** | `Reset()` restores the DAG to pre-`GetReady` state; reuse the same topology with fresh runners |
 
 ---
 
 ## Installation
 
 ```bash
-go get github.com/seoyhaein/dag-go
+go get github.com/HeaInSeo/dag-go
 ```
 
-Requires **Go 1.22+**.
+Requires **Go 1.25+**.
 
 ---
 
@@ -53,7 +53,7 @@ import (
     "fmt"
     "time"
 
-    dag "github.com/seoyhaein/dag-go"
+    dag "github.com/HeaInSeo/dag-go"
 )
 
 type MyRunner struct{ label string }
@@ -123,7 +123,7 @@ InitDag() / StartDag()       creates the synthetic start node
 AddEdge(from, to)             wires parent → child dependencies
         │
 FinishDag()                   validates, detects cycles, then seals the graph
-        │                     ← AddEdge / CreateNode are rejected after this point
+        │                     ← AddEdge / CreateNode / SetContainerCmd rejected after this point
 ConnectRunner()               attaches runner closures to every node
         │
 GetReady(ctx)                 initialises the semaphore; launches one goroutine per node
@@ -131,6 +131,8 @@ GetReady(ctx)                 initialises the semaphore; launches one goroutine 
 Start()                       sends the trigger signal to the start node
         │
 Wait(ctx)                     fans-in all node status streams; returns true on success
+        │
+Reset()                       clears execution state; topology is preserved for re-use
 ```
 
 ---
@@ -144,7 +146,7 @@ Illegal transitions are atomically rejected.
 stateDiagram-v2
     [*] --> Pending : node created
     Pending --> Running  : all parents ready
-    Pending --> Skipped  : a parent failed
+    Pending --> Skipped  : a parent failed (FailFast policy)
     Running --> Succeeded : RunE returns nil
     Running --> Failed    : RunE returns error / timeout
     Succeeded --> [*]
@@ -164,6 +166,7 @@ cfg := dag.DagConfig{
                                         // (safe to set below node count — see below)
     DefaultTimeout:    0,               // per-node RunE timeout; 0 = no limit
     ErrorDrainTimeout: 5 * time.Second, // max time collectErrors waits to drain
+    ErrorPolicy:       dag.FailFast,    // or dag.ContinueOnError
 }
 d := dag.NewDagWithConfig(cfg)
 
@@ -193,18 +196,20 @@ node acquires its execution slot, so waiting for a slot never consumes the budge
 
 ---
 
-## Graph Sealing
+## Lifecycle Guardrails
 
-After `FinishDag()` succeeds, the graph is sealed:
+After `FinishDag()` succeeds, the graph and runner configuration are frozen:
 
 ```go
-d.FinishDag()             // seals the graph
-d.AddEdge("X", "Y")      // returns error: "DAG is already finalized"
-d.CreateNode("Z")         // returns nil
+d.FinishDag()                  // seals the graph
+d.AddEdge("X", "Y")            // error: topology frozen after GetReady
+d.SetContainerCmd(r)           // no-op + error log: frozen after GetReady
+d.SetNodeRunner("n", r)        // no-op + error log: frozen after GetReady
 ```
 
-A failed `FinishDag()` (e.g. cycle detected) leaves the DAG unchanged — no
-`EndNode` is added, no edges are modified. You may correct the graph and retry.
+The frozen window covers from `GetReady` success through `Reset`.
+A failed `FinishDag()` (e.g. cycle detected) leaves the DAG unchanged — you may
+correct the graph and retry.
 
 ---
 
@@ -246,19 +251,64 @@ Runtime errors from `RunE` are written to `Dag.Errors` (`*SafeChannel[error]`)
 and logged via structured logrus fields (`dag_id`, `error`).
 Use `DroppedErrors()` to detect back-pressure on the error channel.
 
+Node-level errors are surfaced as `*NodeError` (supports both `errors.Is` and `errors.As`):
+
+```go
+var nodeErr *dag.NodeError
+if errors.As(err, &nodeErr) {
+    fmt.Println(nodeErr.NodeID, nodeErr.Phase)
+}
+```
+
+---
+
+## Reset & Retry
+
+```go
+d.Wait(ctx)           // completes; DAG is frozen (running=false, nodeResult!=nil)
+d.Reset()             // clears execution state, restores topology for reuse
+d.ConnectRunner()     // re-attach runners (optional: set new runners before this)
+d.GetReady(ctx)
+d.Start()
+d.Wait(ctx)
+```
+
+---
+
+## Mermaid Visualisation
+
+```go
+dot := d.ToMermaid()  // call after FinishDag()
+fmt.Println(dot)
+```
+
+Outputs a `graph TD` Mermaid flowchart with stadium shapes for synthetic nodes
+and per-node runner type labels when registered.
+
 ---
 
 ## Development
 
 ```bash
 # Tests with race detector
-go test -race ./...
+make test
 
-# Lint (golangci-lint v2)
-golangci-lint run ./...
+# Lint (golangci-lint v2.11.3, local binary)
+make lint
+
+# Coverage report (HTML at reports/index.html)
+make coverage
+
+# Security scan (gosec + govulncheck, manual)
+make lint-security
+make vuln
 ```
 
 **Dependency policy:** `k8s.io/*` and `sigs.k8s.io/*` are prohibited (`depguard`).
+
+**Pages:**
+- Benchmark trends: <https://heainseo.github.io/dag-go/dev/bench/>
+- Coverage report: <https://heainseo.github.io/dag-go/coverage/>
 
 ---
 

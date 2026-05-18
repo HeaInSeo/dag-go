@@ -38,7 +38,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	dag "github.com/seoyhaein/dag-go"
+	dag "github.com/HeaInSeo/dag-go"
 )
 
 // ── Runner implementations ───────────────────────────────────────────────────

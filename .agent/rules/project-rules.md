@@ -76,7 +76,7 @@ Flight 함수(`preFlight`, `inFlight`, `postFlight`, `connectRunner`)와 핵심 
 ## Enforcement: Library Purity (라이브러리 순수성)
 - **STRICT FORBIDDEN**: `go.mod` 에 `k8s.io/*` 또는 `sigs.k8s.io/*` 추가 금지.
   - "dag-go 는 순수 Go 라이브러리입니다. K8s 의존성은 허용되지 않습니다."
-- 허용 의존성: 표준 라이브러리, `golang.org/x/sync`, `github.com/google/uuid`, `github.com/seoyhaein/utils`, `github.com/sirupsen/logrus`, `go.uber.org/goleak`.
+- 허용 의존성: 표준 라이브러리, `golang.org/x/sync`, `github.com/google/uuid`, `github.com/HeaInSeo/utils`, `github.com/sirupsen/logrus`, `go.uber.org/goleak`.
 - 새 의존성 추가 시: PR 에 (1) 표준 라이브러리로 불가한 이유, (2) 라이선스, (3) 유지보수 상태를 명시해야 한다.
 
 ## Enforcement: Documentation & Exceptions
