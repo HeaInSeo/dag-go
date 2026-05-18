@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write  # gh-pages 브랜치에 벤치마크 결과를 push하기 위해 필요
 
+# Node.js 24 opt-in (enforcement: 2026-06-02)
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 concurrency:
   group: bench-pages
   cancel-in-progress: false  # 벤치마크는 직렬 실행: 데이터 손실 방지
