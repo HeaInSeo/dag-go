@@ -2190,9 +2190,10 @@ func TestRunnerLoad_NilValue(t *testing.T) {
 	}
 }
 
-// TestStart_ClosedChannel verifies that Start returns false when the StartNode's
-// parent channel is already closed (the Send failure path).
-func TestStart_ClosedChannel(t *testing.T) {
+// TestStart_BeforeGetReady verifies that Start returns false when GetReady has
+// not been called (startTrigger is nil).  The send-failure path for a closed
+// trigger is covered by TestStartE_TriggerSendFails.
+func TestStart_BeforeGetReady(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	Log.SetOutput(io.Discard)
 
@@ -2209,12 +2210,10 @@ func TestStart_ClosedChannel(t *testing.T) {
 	dag.SetContainerCmd(NoopCmd{})
 	dag.ConnectRunner()
 
-	// Close the StartNode's trigger channel so Send will fail.
-	dag.startNode.parentVertex[0].Close() //nolint:errcheck
-
+	// startTrigger is nil until GetReady is called; Start must return false.
 	result := dag.Start()
 	if result {
-		t.Error("expected Start to return false when trigger channel is closed")
+		t.Error("expected Start to return false when GetReady has not been called")
 	}
 	// Cleanup channels to avoid goroutine leaks.
 	dag.closeChannels()

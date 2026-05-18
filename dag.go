@@ -1293,23 +1293,23 @@ func (dag *Dag) reset() {
 // The graph topology (nodes, edges, Config, ContainerCmd, runners) is preserved;
 // only execution state is reset.
 func (dag *Dag) Reset() {
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
 	if dag.running.Load() {
 		Log.Error("Reset: called while DAG is running; ignoring — call Wait first")
 		return
 	}
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
 	dag.reset()
 }
 
 // ResetE is the error-returning variant of Reset.  It returns an error when
 // called while the DAG is still running (i.e. Wait has not yet returned).
 func (dag *Dag) ResetE() error {
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
 	if dag.running.Load() {
 		return fmt.Errorf("Reset: cannot reset while DAG is running; call Wait first")
 	}
-	dag.mu.Lock()
-	defer dag.mu.Unlock()
 	dag.reset()
 	return nil
 }
@@ -1317,11 +1317,15 @@ func (dag *Dag) ResetE() error {
 // ConnectRunnerE attaches the three-phase runner closure (preFlight / inFlight /
 // postFlight) to every node.  Call it after FinishDag and before GetReady; call
 // it again after Reset so the closures reference the freshly created channels.
-// Returns an error if the DAG has no nodes.
+// Returns an error if the DAG has no nodes or if GetReady has already been called
+// (runner closures must not be replaced while goroutines are live).
 func (dag *Dag) ConnectRunnerE() error {
-	dag.mu.RLock()
-	defer dag.mu.RUnlock()
+	dag.mu.Lock()
+	defer dag.mu.Unlock()
 
+	if dag.nodeResult != nil || dag.running.Load() {
+		return fmt.Errorf("ConnectRunner: cannot reconnect runners after GetReady; call Reset first")
+	}
 	if len(dag.nodes) < 1 {
 		return fmt.Errorf("ConnectRunner: DAG has no nodes")
 	}
@@ -1393,8 +1397,11 @@ func (dag *Dag) GetReadyE(ctx context.Context) error {
 			len(dag.startNode.parentVertex))
 	}
 	dag.startTrigger = dag.startNode.parentVertex[0]
-
 	dag.execSem = make(chan struct{}, dag.Config.WorkerPoolSize)
+	// Set running=true before launching goroutines so that Reset is blocked
+	// from the moment the first goroutine is spawned.
+	dag.running.Store(true)
+
 	safeChs := make([]*SafeChannel[*printStatus], 0, n)
 
 	for _, v := range dag.nodes {
@@ -1408,7 +1415,6 @@ func (dag *Dag) GetReadyE(ctx context.Context) error {
 	}
 
 	dag.nodeResult = safeChs
-	dag.running.Store(true)
 	return nil
 }
 
@@ -1493,12 +1499,13 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 
 	// Cleanup (LIFO order of defer):
 	//   1. wait for all per-node goroutines to exit
-	//   2. clear the running flag so Reset() is safe to call
-	//   3. close all channels
+	//   2. close all channels (must happen before running=false so Reset cannot
+	//      race against closeChannels creating new channels on old memory)
+	//   3. clear the running flag so Reset() is safe to call
 	defer func() {
 		dag.nodeWg.Wait()
-		dag.running.Store(false)
 		dag.closeChannels()
+		dag.running.Store(false)
 	}()
 
 	// 컨텍스트에서 타임아웃 설정
