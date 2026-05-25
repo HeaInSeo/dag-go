@@ -5,12 +5,12 @@ Update this file at the start and end of every stage.
 
 ---
 
-## Current Status: Stage 15 — DAG Execution Lifecycle Stabilization (fully completed)
+## Current Status: Stage 16 — Bugfix Release v1.2.1 (fully completed)
 
 **Branch:** `main`
-**Last updated:** 2026-05-18
-**Coverage:** 92.6% (Stage 13 대비 +2.6%p)
-**Tag:** `v1.1.0`
+**Last updated:** 2026-05-25
+**Coverage:** 93.0% (Stage 14 대비 +0.4%p)
+**Tag:** `v1.2.1`
 
 ---
 
@@ -355,6 +355,60 @@ Update this file at the start and end of every stage.
 
 ---
 
+### Stage 16 — Bugfix Release v1.2.1 (completed)
+
+#### Bug Fixes (6건)
+
+**Issue 1 — Progress 미반영 (connectRunner 조기 반환 경로)**
+- **원인**: `connectRunner`의 4개 조기 반환 경로에서 `n.MarkCompleted()` 누락.
+  `CheckParentsStatus` 실패, nil 노드, preFlight 실패, nil runner 경로가 `Progress()`에 미반영.
+- **수정**: 4개 조기 반환 경로 모두에 `n.MarkCompleted()` 추가.
+
+**Issue 2 — 2-hop downstream이 Skipped 대신 Failed로 표시**
+- **원인**: A(실패)→B→C 체인에서 C가 Failed 부모 B 신호를 받아 Failed로 분류됨.
+  `parentReceiverFunc`가 `fmt.Errorf(...)` 동적 에러를 반환하여 dependency-blocked와
+  infrastructure error를 구분하지 못했음.
+- **수정**:
+  - `errors.go`: `ErrDependencyBlocked` 정적 센티넬 추가.
+  - `node.go` (`parentReceiverFunc`): `Failed + FailFast` 시 `ErrDependencyBlocked` 반환.
+  - `node.go` (`preFlight`): 시그니처 `(*printStatus, error)` 로 변경 — errgroup 에러 전파.
+  - `node.go` (`CheckParentsStatus`): Skipped 부모 감지 추가 (기존 Failed만 감지).
+  - `node.go` (`isValidTransition`): `Running→Skipped` 전이 허용 추가.
+  - `dag.go` (`connectRunner`): `errors.Is(err, ErrDependencyBlocked)` 로 Skipped/Failed 분기.
+  - `dag.go`: `DependencySkipped runningStatus` 상수 추가.
+  - 효과: A→B→C에서 A 실패 시 B, C 모두 deterministic하게 `NodeStatusSkipped` 전이.
+
+**Issue 3 — DagWorkerPool 설계 결함**
+- `DagWorkerPool` Deprecated godoc 마킹. `execSem` 방식 유지.
+  (pool size < node count 시 deadlock — 구조적 결함으로 실행 경로에서 분리)
+
+**Issue 4 — dag.createNode 불필요한 분기 + 미사용 함수**
+- `dag.createNode`, `createNodeWithTimeOut`: 죽은 if/else 분기 제거.
+- 패키지 수준 `createNode(id, Runnable)` 함수: 미사용 → 제거.
+
+**Issue 5 — minInt 함수 + WorkerPoolSize 주석 오류**
+- `minInt` 함수 및 `TestMinInt` 제거.
+- `WorkerPoolSize` godoc의 "min of the two" 오류 설명 수정.
+
+**Issue 6 — fanIn printStatus 풀 누수**
+- `fanIn`: `SendBlocking` 실패(ctx 취소) 경로에 `releasePrintStatus(val)` 추가.
+
+#### CI / 성능 회귀 테스트
+
+- `bench.yml`: `workflow_dispatch` 전용 → `push[main] + workflow_dispatch` 자동 트리거.
+- `scripts/bench_compare.sh`: 베이스라인 전체 재설정, 임계치 10%→15%, NOISY 목록 확대.
+  - PreFlight: 27,685 → 18,330 ns/op (ErrDependencyBlocked 정적 센티넬 효과 — allocs 89→43).
+
+#### 검증 결과
+
+- `go test -race ./...` — **0 data races, all tests pass**.
+- `golangci-lint run ./...` — **0 issues**.
+- `make bench-compare` — **exit 0** (soft warnings only, no FAIL).
+- GitHub Actions: Lint / Tests / Benchmarks 모두 **green**.
+- **Coverage**: 92.6% → **93.0%** (+0.4%p).
+
+---
+
 ## Pending Items
 
 ### Stage 8 — Error Handling Continuation (planned)
@@ -403,9 +457,20 @@ Update this file at the start and end of every stage.
 | `postFlight` / `notifyChildren` | ctx-aware signal delivery | Use `SendBlocking` so a cancelled context unblocks the send; child nodes never wait forever on a failed parent |
 | `nodeTask` / `DagWorkerPool` | Zero-alloc worker queue | `chan nodeTask` replaces `chan func()`; eliminates one closure allocation per node per DAG run |
 | `Dag.droppedErrors` | Atomic drop counter | Incremented by `reportError` on overflow; exposed via `DroppedErrors()`; zeroed by `Reset()` |
-| `preFlight` goroutine bounding | `eg.SetLimit(10)` + `eg.Go` | SetLimit caps concurrent parent-channel readers; `eg.Go` (NOT TryGo) blocks until a slot is available — all parents are always processed regardless of parent count |
+| `preFlight` goroutine bounding | `eg.Go` (unbounded) | No SetLimit: all parent receivers must start immediately so no parent is left without a reader; bounding creates backpressure against postFlight (Stage 13 bug fix: TryGo+SetLimit removed) |
 | `fanIn` race guard | `SendBlocking` with egCtx | Replaced direct `chan` write with `merged.SendBlocking(egCtx, val)`; eliminates write/close race when `closeChannels()` fires concurrently |
 | `WorkerPoolSize` correctness | Must ≥ node count | With too few workers, EndNode preFlight goroutines can block waiting for sibling results while siblings are queued — causing deadlock; default `nodeCount + 10` is safety margin |
 | `ErrNoRunner` structured error | `*NodeError` wrapping sentinel | `execute()` returns `&NodeError{NodeID, Phase:"execute", Err:ErrNoRunner}`; `errors.Is` + `errors.As` both work |
 | `Dag.ErrCount()` | `len(ch)` snapshot | Returns buffered error count without draining; pair with `DroppedErrors()` for full picture |
 | `ErrorPolicy` / `WithErrorPolicy` | `DagConfig.ErrorPolicy` field | `FailFast` (default, zero value) skips children; `ContinueOnError` bypasses CheckParentsStatus guard and treats `Failed` parent signal as non-error in preFlight |
+| `ErrDependencyBlocked` | Static sentinel (errors.go) | Returned by `parentReceiverFunc` under FailFast when parent signals Failed; `connectRunner` uses `errors.Is` to distinguish Skipped (dependency chain) from Failed (infrastructure error) |
+| `DependencySkipped` runningStatus | Terminal event constant | Emitted by `connectRunner` when a node is Skipped due to upstream dependency failure; distinct from `PostFlightFailed` which indicates a node that ran and failed |
+
+---
+
+## Known Follow-ups (post-v1.2.1)
+
+| Item | Description |
+|---|---|
+| `dag.bTimeout bool` | Review usage in `Wait`; consider removing or renaming for clarity (D-exec cleanup candidate) |
+| GitHub Actions Node.js 20 | `actions/checkout@v4`, `actions/setup-go@v5` etc. use Node.js 20 (deprecated 2026-06-02 enforcement); update action versions to remove warnings |
