@@ -2,6 +2,7 @@ package dag_go
 
 import (
 	"context"
+	"errors"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -33,7 +34,7 @@ func TestPreFlight_AllSucceed(t *testing.T) {
 	// 부모 채널 슬라이스에 할당
 	node.parentVertex = []*SafeChannel[runningStatus]{safeCh1, safeCh2}
 
-	ps := preFlight(ctx, node)
+	ps, _ := preFlight(ctx, node)
 	if ps.rStatus != Preflight {
 		t.Errorf("Expected status %v, got %v", Preflight, ps.rStatus)
 	}
@@ -67,7 +68,7 @@ func TestPreFlight_OneFailed(t *testing.T) {
 	// 부모 채널 슬라이스에 SafeChannel 포인터들을 할당
 	node.parentVertex = []*SafeChannel[runningStatus]{safeCh1, safeCh2}
 
-	ps := preFlight(ctx, node)
+	ps, err := preFlight(ctx, node)
 	if ps.rStatus != PreflightFailed {
 		t.Errorf("Expected status %v, got %v", PreflightFailed, ps.rStatus)
 	}
@@ -77,6 +78,10 @@ func TestPreFlight_OneFailed(t *testing.T) {
 	// 실패하였으므로 node 의 succeed 플래그는 false 여야 한다.
 	if node.IsSucceed() {
 		t.Error("Expected node.succeed to be false")
+	}
+	// parent 채널이 Failed 신호를 보낸 경우 ErrDependencyBlocked 가 반환되어야 한다.
+	if !errors.Is(err, ErrDependencyBlocked) {
+		t.Errorf("expected ErrDependencyBlocked, got %v", err)
 	}
 }
 
@@ -89,7 +94,7 @@ func TestPreFlight_NoParents(t *testing.T) {
 	// 부모 채널이 없는 경우, 빈 SafeChannel 슬라이스 할당
 	node.parentVertex = []*SafeChannel[runningStatus]{}
 
-	ps := preFlight(ctx, node)
+	ps, _ := preFlight(ctx, node)
 	if ps.rStatus != Preflight {
 		t.Errorf("Expected status %v, got %v", Preflight, ps.rStatus)
 	}
@@ -116,7 +121,8 @@ func TestPreFlight_ContextCanceled(t *testing.T) {
 
 	done := make(chan *printStatus)
 	go func() {
-		done <- preFlight(ctx, node)
+		ps, _ := preFlight(ctx, node)
+		done <- ps
 	}()
 
 	select {
@@ -141,7 +147,7 @@ func TestPreFlight_AllSucceed_WithManyChannels(t *testing.T) {
 	// 예를 들어, 10개의 부모 채널을 비동기적으로 값 넣도록 생성
 	node.parentVertex = createParentChannels(10, Succeed)
 
-	ps := preFlight(ctx, node)
+	ps, _ := preFlight(ctx, node)
 	if ps.rStatus != Preflight {
 		t.Errorf("Expected status %v, got %v", Preflight, ps.rStatus)
 	}
@@ -169,6 +175,7 @@ func TestTransitionStatus_ValidTransitions(t *testing.T) {
 		{"Pending→Skipped", NodeStatusPending, NodeStatusSkipped},
 		{"Running→Succeeded", NodeStatusRunning, NodeStatusSucceeded},
 		{"Running→Failed", NodeStatusRunning, NodeStatusFailed},
+		{"Running→Skipped", NodeStatusRunning, NodeStatusSkipped},
 	}
 
 	for _, tc := range cases {
@@ -355,7 +362,7 @@ func TestPreFlight_MoreThan10Parents(t *testing.T) {
 	node := &Node{ID: "node_15parents"}
 	node.parentVertex = createParentChannels(numParents, Succeed)
 
-	ps := preFlight(ctx, node)
+	ps, _ := preFlight(ctx, node)
 	if ps.rStatus != Preflight {
 		t.Errorf("expected Preflight, got %v (preFlight must not stall with >10 parents)", ps.rStatus)
 	}
@@ -386,7 +393,7 @@ func TestPreFlight_FailedParent_CancelsOtherGoroutines(t *testing.T) {
 	node.parentVertex = []*SafeChannel[runningStatus]{failCh, blockCh1, blockCh2}
 
 	start := time.Now()
-	ps := preFlight(ctx, node)
+	ps, err := preFlight(ctx, node)
 	elapsed := time.Since(start)
 
 	if ps.rStatus != PreflightFailed {
@@ -394,6 +401,10 @@ func TestPreFlight_FailedParent_CancelsOtherGoroutines(t *testing.T) {
 	}
 	if node.IsSucceed() {
 		t.Error("expected node.succeed = false after parent failure")
+	}
+	// A parent channel delivered Failed — must return ErrDependencyBlocked.
+	if !errors.Is(err, ErrDependencyBlocked) {
+		t.Errorf("expected ErrDependencyBlocked, got %v", err)
 	}
 	// Must return promptly: egCtx cancellation must unblock the two waiting goroutines
 	// without requiring blockCh1/blockCh2 to send.

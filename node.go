@@ -88,7 +88,10 @@ func isValidTransition(from, to NodeStatus) bool {
 	case NodeStatusPending:
 		return to == NodeStatusRunning || to == NodeStatusSkipped
 	case NodeStatusRunning:
-		return to == NodeStatusSucceeded || to == NodeStatusFailed
+		// Running→Skipped is permitted: a node that entered preFlight may still
+		// be determined to be dependency-blocked (ErrDependencyBlocked) before
+		// any user code runs, making Skipped the correct terminal state.
+		return to == NodeStatusSucceeded || to == NodeStatusFailed || to == NodeStatusSkipped
 	default:
 		// Terminal states have no outgoing transitions.
 		return false
@@ -130,12 +133,14 @@ func (n *Node) IsSucceed() bool {
 }
 
 // CheckParentsStatus returns false (and transitions this node to Skipped) if any
-// parent has already failed.  The Pending→Skipped transition is guarded by
-// TransitionStatus so that a node in an unexpected state is never silently
-// overwritten.
+// parent has already failed or been skipped.  A Skipped parent means the
+// dependency chain was blocked upstream — this node must not run either.
+// The Pending→Skipped transition is guarded by TransitionStatus so that a node
+// in an unexpected state is never silently overwritten.
 func (n *Node) CheckParentsStatus() bool {
 	for _, parent := range n.parent {
-		if parent.GetStatus() == NodeStatusFailed {
+		st := parent.GetStatus()
+		if st == NodeStatusFailed || st == NodeStatusSkipped {
 			n.TransitionStatus(NodeStatusPending, NodeStatusSkipped)
 			return false
 		}
@@ -167,7 +172,9 @@ func (e *NodeError) Unwrap() error {
 
 // parentReceiverFunc returns the errgroup worker that waits for one parent channel.
 // Returns nil when the parent signals a non-Failed status, or when policy is
-// ContinueOnError. Returns an error on Failed+FailFast or context cancellation.
+// ContinueOnError. Returns ErrDependencyBlocked on Failed+FailFast so that the
+// caller can distinguish a dependency-blocked preFlight from an infrastructure
+// error (nil channel, context cancellation).
 func parentReceiverFunc(
 	egCtx context.Context, nodeID string, k int,
 	sc *SafeChannel[runningStatus], policy ErrorPolicy, pprofEnabled bool,
@@ -177,7 +184,7 @@ func parentReceiverFunc(
 		select {
 		case result := <-sc.GetChannel():
 			if result == Failed && policy == ErrorPolicyFailFast {
-				return fmt.Errorf("node %s: parent channel returned Failed", nodeID)
+				return ErrDependencyBlocked
 			}
 			return nil
 		case <-egCtx.Done():
@@ -196,9 +203,9 @@ func parentReceiverFunc(
 // parent channel immediately.  Limiting concurrency here would leave some parent
 // channels without a receiver, creating backpressure against postFlight even when
 // the channel is buffered.  Fan-in policy limits belong at the DAG validation layer.
-func preFlight(ctx context.Context, n *Node) *printStatus {
+func preFlight(ctx context.Context, n *Node) (*printStatus, error) {
 	if n == nil {
-		return newPrintStatus(PreflightFailed, noNodeID)
+		return newPrintStatus(PreflightFailed, noNodeID), nil
 	}
 
 	// Build an errgroup using the caller's context directly.
@@ -236,20 +243,18 @@ func preFlight(ctx context.Context, n *Node) *printStatus {
 	if err == nil {
 		n.SetSucceed(true)
 		Log.Println("Preflight", n.ID)
-		return newPrintStatus(Preflight, n.ID)
+		return newPrintStatus(Preflight, n.ID), nil
 	}
 
-	if err != nil {
-		nodeErr := &NodeError{NodeID: n.ID, Phase: "preflight", Err: err}
-		Log.Println(nodeErr.Error())
-		if n.parentDag != nil {
-			n.parentDag.reportError(nodeErr)
-		}
+	nodeErr := &NodeError{NodeID: n.ID, Phase: "preflight", Err: err}
+	Log.Println(nodeErr.Error())
+	if n.parentDag != nil {
+		n.parentDag.reportError(nodeErr)
 	}
 
 	n.SetSucceed(false)
 	Log.Println("Preflight failed for node", n.ID, "error:", err)
-	return newPrintStatus(PreflightFailed, n.ID)
+	return newPrintStatus(PreflightFailed, n.ID), err
 }
 
 // inFlight runs the node's Runnable via Execute.  ctx is forwarded so that
@@ -327,13 +332,6 @@ func postFlight(ctx context.Context, n *Node) *printStatus {
 // Execute runs the node's resolved Runnable, forwarding ctx for cancellation.
 func (n *Node) Execute(ctx context.Context) error {
 	return execute(ctx, n)
-}
-
-// createNode creates a Node pre-loaded with the given Runnable.
-func createNode(id string, r Runnable) *Node {
-	n := &Node{ID: id, status: NodeStatusPending}
-	n.runnerStore(r) // first Store (non-nil *runnerSlot wrapper)
-	return n
 }
 
 // createNodeWithID creates a Node with no runner pre-loaded.

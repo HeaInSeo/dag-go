@@ -2,6 +2,7 @@ package dag_go
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -34,6 +35,13 @@ const (
 	FlightEnd
 	Failed
 	Succeed
+	// DependencySkipped is emitted when a node is not executed because a parent
+	// dependency failed or was itself skipped.  It replaces the misleading
+	// PostFlightFailed event that was previously sent on the CheckParentsStatus
+	// skip path, and is also emitted when preFlight returns ErrDependencyBlocked.
+	// Unlike PostFlightFailed, DependencySkipped unambiguously means "this node
+	// never ran — it was blocked by an upstream dependency."
+	DependencySkipped
 )
 
 // StartNode and EndNode are the reserved IDs for the synthetic entry and exit nodes
@@ -71,8 +79,7 @@ type DagConfig struct {
 	StatusBuffer int
 
 	// WorkerPoolSize caps the number of goroutines that execute nodes concurrently.
-	// If the number of nodes is smaller than WorkerPoolSize, the pool is sized to
-	// the node count instead (min of the two).  Default: 50.
+	// Default: 50.
 	WorkerPoolSize int
 
 	// DefaultTimeout is the implicit per-node execution timeout applied during
@@ -118,6 +125,10 @@ type DagOption func(*Dag)
 // Passing a concrete struct to the worker queue eliminates the closure
 // allocation that the previous func() approach incurred per submission —
 // removing per-node heap pressure in large DAG executions.
+//
+// Deprecated: nodeTask is used only by DagWorkerPool, which is no longer
+// connected to the DAG execution path.  The active concurrency mechanism is
+// execSem (a buffered channel semaphore) inside GetReadyE.
 type nodeTask struct {
 	node *Node
 	sc   *SafeChannel[*printStatus]
@@ -126,6 +137,11 @@ type nodeTask struct {
 
 // DagWorkerPool manages a bounded pool of goroutines for concurrent node execution.
 // Tasks are submitted via Submit; Close drains the queue and waits for all workers.
+//
+// Deprecated: DagWorkerPool is not used by the DAG execution path.  GetReadyE
+// launches one goroutine per node directly and relies on execSem (a buffered
+// channel with capacity == WorkerPoolSize) to cap concurrent inFlight execution.
+// DagWorkerPool is retained for reference; it may be removed in a future release.
 type DagWorkerPool struct {
 	workerLimit int
 	taskQueue   chan nodeTask
@@ -587,6 +603,8 @@ func WithErrorPolicy(p ErrorPolicy) DagOption {
 // NewDagWorkerPool creates a new worker pool with the given number of goroutines.
 // The internal task queue is buffered to twice the worker count so that
 // callers are not serialised behind goroutine startup latency.
+//
+// Deprecated: see DagWorkerPool.
 func NewDagWorkerPool(limit int) *DagWorkerPool {
 	pool := &DagWorkerPool{
 		workerLimit: limit,
@@ -612,12 +630,16 @@ func NewDagWorkerPool(limit int) *DagWorkerPool {
 }
 
 // Submit enqueues a nodeTask for execution by the worker pool.
+//
+// Deprecated: see DagWorkerPool.
 func (p *DagWorkerPool) Submit(task nodeTask) {
 	p.taskQueue <- task
 }
 
-// Close 워커 풀을 종료.
-// sync.Once 를 통해 taskQueue 를 한 번만 닫으므로 이중 호출 시 패닉이 발생하지 않는다.
+// Close shuts down the worker pool, draining the task queue and waiting for all
+// goroutines to exit.  sync.Once prevents a double-close panic.
+//
+// Deprecated: see DagWorkerPool.
 func (p *DagWorkerPool) Close() {
 	p.closeOnce.Do(func() { close(p.taskQueue) })
 	p.wg.Wait()
@@ -869,15 +891,7 @@ func (dag *Dag) createNode(id string) *Node {
 		return nil
 	}
 
-	var node *Node
-	if dag.ContainerCmd != nil {
-		node = createNode(id, dag.ContainerCmd)
-	} else {
-		node = createNodeWithID(id)
-	}
-	// node.runnerStore(dag.ContainerCmd)
-	// 추가 초기 스토어: 기본 러너가 없어도 &runnerSlot{}로 non-nil 보장
-	node.runnerStore(nil)
+	node := createNodeWithID(id)
 	node.parentDag = dag
 	dag.nodes[id] = node
 
@@ -895,17 +909,7 @@ func (dag *Dag) createNodeWithTimeOut(id string, ti time.Duration) *Node {
 		return nil
 	}
 
-	var node *Node
-	if dag.ContainerCmd != nil {
-		// dag.ContainerCmd 이건 모든 노드에 적용되게 하는 옵션이라서 이렇게 함.
-		node = createNode(id, dag.ContainerCmd)
-	} else {
-		node = createNodeWithID(id)
-	}
-
-	// 실행 시점 반영 기본: nil 저장
-	node.runnerStore(nil)
-
+	node := createNodeWithID(id)
 	node.Timeout = ti
 	node.parentDag = dag
 	dag.nodes[id] = node
@@ -1513,7 +1517,7 @@ func (dag *Dag) Start() bool {
 // it returns, regardless of whether execution succeeded.  Do NOT use the DAG
 // after Wait returns without first calling Reset.
 //
-//nolint:gocognit // fan-in select loop must handle merge result, node status stream, and context cancellation simultaneously
+//nolint:gocognit,gocyclo // fan-in select loop must handle merge result, node status stream, and context cancellation simultaneously
 func (dag *Dag) Wait(ctx context.Context) bool {
 	if ctx == nil {
 		return false
@@ -1579,7 +1583,8 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 				releasePrintStatus(c)
 				if rStatus == PreflightFailed ||
 					rStatus == InFlightFailed ||
-					rStatus == PostFlightFailed {
+					rStatus == PostFlightFailed ||
+					rStatus == DependencySkipped {
 					return false
 				}
 				if rStatus == FlightEnd {
@@ -1725,10 +1730,11 @@ func connectRunner(n *Node) {
 			policy = n.parentDag.Config.ErrorPolicy
 		}
 		if policy == ErrorPolicyFailFast && !n.CheckParentsStatus() {
-			ps := newPrintStatus(PostFlightFailed, n.ID)
+			ps := newPrintStatus(DependencySkipped, n.ID)
 			sendResult(ps)
 			n.notifyChildren(ctx, Failed)
 			releasePrintStatus(ps)
+			n.MarkCompleted()
 			return
 		}
 
@@ -1741,16 +1747,30 @@ func connectRunner(n *Node) {
 		// preFlight phase — waits for all parent signals using the caller ctx only.
 		// No execution budget is consumed here: dependency wait must not reduce
 		// the time available for the node's own work (inFlight).
-		ps := preFlight(ctx, n)
-		sendResult(ps)
+		ps, preflightErr := preFlight(ctx, n)
 		if ps.rStatus == PreflightFailed {
-			if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
-				Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
+			if errors.Is(preflightErr, ErrDependencyBlocked) {
+				// Parent failed or was skipped — this node never ran.
+				// Transition to Skipped (not Failed): the node itself did nothing wrong.
+				if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusSkipped); !ok {
+					Log.Warnf("connectRunner: Running→Skipped rejected for node %s (status=%v)", n.ID, n.GetStatus())
+				}
+				depPs := newPrintStatus(DependencySkipped, n.ID)
+				sendResult(depPs)
+				releasePrintStatus(depPs)
+			} else {
+				// Genuine preFlight infrastructure failure (nil channel, ctx cancel, etc.)
+				if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusFailed); !ok {
+					Log.Warnf("connectRunner: Running→Failed rejected for node %s (status=%v)", n.ID, n.GetStatus())
+				}
+				sendResult(ps)
 			}
 			n.notifyChildren(ctx, Failed)
 			releasePrintStatus(ps)
+			n.MarkCompleted()
 			return
 		}
+		sendResult(ps)
 		releasePrintStatus(ps)
 
 		// Acquire the execution semaphore slot.  Only inFlight (RunE) holds the
@@ -1770,6 +1790,7 @@ func connectRunner(n *Node) {
 				}
 				n.notifyChildren(ctx, Failed)
 				releasePrintStatus(semPs)
+				n.MarkCompleted()
 				return
 			}
 		}
@@ -1809,6 +1830,7 @@ func connectRunner(n *Node) {
 			}
 			n.notifyChildren(ctx, Failed)
 			releasePrintStatus(ps)
+			n.MarkCompleted()
 			return
 		}
 		releasePrintStatus(ps)
@@ -1851,6 +1873,7 @@ func fanIn(ctx context.Context, channels []*SafeChannel[*printStatus], merged *S
 		eg.Go(func() error {
 			for val := range sc.GetChannel() {
 				if !merged.SendBlocking(egCtx, val) {
+					releasePrintStatus(val)
 					return egCtx.Err()
 				}
 			}
@@ -1859,14 +1882,6 @@ func fanIn(ctx context.Context, channels []*SafeChannel[*printStatus], merged *S
 	}
 
 	return eg.Wait() == nil
-}
-
-// min returns the minimum of two integers.
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // ToMermaid generates a Mermaid flowchart string that represents the DAG topology.

@@ -6,6 +6,14 @@ import "errors"
 // Callers can test for this condition with errors.Is(err, ErrCycleDetected).
 var ErrCycleDetected = errors.New("cycle detected in DAG")
 
+// ErrDependencyBlocked is returned by parentReceiverFunc when a parent channel
+// delivers a Failed signal under FailFast policy.  It is distinct from
+// infrastructure errors (nil channel, context cancellation) so that connectRunner
+// can transition a blocked node to NodeStatusSkipped rather than NodeStatusFailed:
+// the node never ran, so it is not "failed" — it was simply blocked by an upstream
+// dependency.  Use errors.Is to test for this condition.
+var ErrDependencyBlocked = errors.New("dependency blocked")
+
 // ErrorType identifies the DAG operation that produced a systemError.
 type (
 	ErrorType int

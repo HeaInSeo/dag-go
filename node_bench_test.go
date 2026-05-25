@@ -48,7 +48,7 @@ func BenchmarkPreFlight(b *testing.B) {
 	node := setupNode("benchmark_preFlight", 10, Succeed)
 
 	// Warm-up: 벤치마크 루프 전에 한 번 실행하고, 이후 부모 채널을 재채움
-	_ = preFlight(ctx, node)
+	_, _ = preFlight(ctx, node)
 	// 각 부모 SafeChannel 에 Succeed 값을 재삽입
 	for j := 0; j < len(node.parentVertex); j++ {
 		node.parentVertex[j].Send(Succeed)
@@ -57,7 +57,7 @@ func BenchmarkPreFlight(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = preFlight(ctx, node)
+		_, _ = preFlight(ctx, node)
 		// 각 반복 후 부모 채널을 다시 채워 다음 반복에 대비
 		for j := 0; j < len(node.parentVertex); j++ {
 			node.parentVertex[j].Send(Succeed)

@@ -1293,6 +1293,10 @@ func TestDroppedErrors_Counter(t *testing.T) {
 
 // TestWorkerPool_NodeTask verifies that the zero-churn worker pool correctly
 // executes nodeTask entries and that no closures are created per submission.
+//
+// NOTE: DagWorkerPool and nodeTask are deprecated — they are no longer connected
+// to the DAG execution path.  This test is retained to preserve coverage of the
+// deprecated API until it is removed.
 func TestWorkerPool_NodeTask(t *testing.T) {
 	defer goleak.VerifyNone(t)
 	const workers = 4
@@ -1576,13 +1580,9 @@ func TestWait_ContextCancellation(t *testing.T) {
 //  2. Children of the failing node do NOT reach NodeStatusSucceeded.
 //  3. DroppedErrors remains 0 (errors are not dropped, just failures propagated).
 //
-// NOTE on Skipped vs Failed: children may end up as either NodeStatusFailed or
-// NodeStatusSkipped depending on execution timing.  If a child observes the
-// failed parent via CheckParentsStatus before preFlight, it transitions to
-// Skipped.  If the child is already in preFlight waiting when the parent fails,
-// it receives a Failed channel signal and transitions Running→Failed.
-// Both outcomes are correct — the important invariant is that children never
-// report NodeStatusSucceeded when their parent has failed.
+// After the fix, children always end up Skipped regardless of timing:
+// CheckParentsStatus detects Failed parents early and ErrDependencyBlocked
+// causes the preFlight path to transition Running→Skipped rather than Failed.
 //
 //nolint:gocognit,gocyclo // test covers topology setup, failure injection, signal propagation, and multi-node status assertion
 func TestDag_ParentFailurePropagation(t *testing.T) {
@@ -1634,19 +1634,39 @@ func TestDag_ParentFailurePropagation(t *testing.T) {
 		t.Error("expected Wait to return false when a root node fails")
 	}
 
-	// B and C must NOT have succeeded — they must be either Failed or Skipped.
+	// B and C must be Skipped: they never ran because their parent A failed.
 	for _, id := range []string{"B", "C"} {
 		n := dag.nodes[id]
 		if n == nil {
 			t.Fatalf("node %s not found", id)
 		}
 		st := n.GetStatus()
-		if st == NodeStatusSucceeded {
-			t.Errorf("node %s: should not have Succeeded when parent A failed, got %v", id, st)
+		if st != NodeStatusSkipped {
+			t.Errorf("node %s: expected Skipped when parent A failed, got %v", id, st)
 		}
-		if st != NodeStatusFailed && st != NodeStatusSkipped {
-			t.Errorf("node %s: expected Failed or Skipped, got %v", id, st)
-		}
+	}
+}
+
+// TestCheckParentsStatus_SkippedParent verifies that CheckParentsStatus also
+// transitions a Pending node to Skipped when its parent is Skipped (not just
+// Failed).  A Skipped parent means the dependency chain was blocked upstream;
+// the child must not run either.
+func TestCheckParentsStatus_SkippedParent(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	parent := &Node{ID: "parent"}
+	parent.runnerStore(nil)
+	parent.SetStatus(NodeStatusSkipped)
+
+	child := &Node{ID: "child"}
+	child.runnerStore(nil)
+	child.parent = []*Node{parent}
+
+	if child.CheckParentsStatus() {
+		t.Error("expected CheckParentsStatus to return false for a skipped parent")
+	}
+	if st := child.GetStatus(); st != NodeStatusSkipped {
+		t.Errorf("expected child status Skipped, got %v", st)
 	}
 }
 
@@ -1956,21 +1976,6 @@ func TestCreateNodeWithTimeOut(t *testing.T) {
 	n3 := dag.CreateNodeWithTimeOut("timer-node", true, 5*time.Second)
 	if n3 != nil {
 		t.Error("expected nil for duplicate node ID")
-	}
-}
-
-// TestMinInt verifies both branches of the minInt helper: return a (a < b)
-// and return b (a >= b).  minInt is an internal package-level function
-// accessible from tests in the same package.
-func TestMinInt(t *testing.T) {
-	if got := minInt(3, 7); got != 3 {
-		t.Errorf("minInt(3,7): expected 3, got %d", got)
-	}
-	if got := minInt(7, 3); got != 3 {
-		t.Errorf("minInt(7,3): expected 3, got %d", got)
-	}
-	if got := minInt(5, 5); got != 5 {
-		t.Errorf("minInt(5,5): expected 5, got %d", got)
 	}
 }
 
@@ -2501,6 +2506,114 @@ func TestProgress_EmptyDAG(t *testing.T) {
 		t.Errorf("expected Progress()=0.0 for empty DAG, got %f", got)
 	}
 	dag.Errors.Close() //nolint:errcheck
+}
+
+// TestProgress_ReachesOneOnFailure verifies that Progress() reaches 1.0 after
+// Wait returns even when a node fails (and downstream nodes are skipped).
+// Before the fix, failed/skipped nodes never called MarkCompleted, so Progress
+// was permanently stuck below 1.0.
+//
+//nolint:gocognit // multi-step DAG setup + lifecycle; splitting would obscure intent
+func TestProgress_ReachesOneOnFailure(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	// Graph: start_node → A → B → end_node
+	// A always fails; B should be skipped.
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	if err := dag.AddEdge(StartNode, "A"); err != nil {
+		t.Fatalf("AddEdge start→A: %v", err)
+	}
+	if err := dag.AddEdge("A", "B"); err != nil {
+		t.Fatalf("AddEdge A→B: %v", err)
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	dag.SetNodeRunner("A", failingRunner{})
+
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx := context.Background()
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+
+	dag.Wait(ctx) // returns false (failure expected)
+
+	if p := dag.Progress(); p != 1.0 {
+		t.Errorf("Progress after failure: want 1.0, got %v (nodeCount=%d completedCount approx %v)",
+			p, dag.nodeCount, int64(p*float64(dag.nodeCount)))
+	}
+}
+
+// TestSkipped_TwoHopDownstream verifies that nodes 2+ hops downstream of a
+// failing node are also Skipped (not Failed).  This is the regression test for
+// the bug where 1-hop children were Skipped but 2-hop children were Failed.
+//
+// Topology: start_node → A(fails) → B → C → end_node
+// Expected: A=Failed, B=Skipped, C=Skipped
+//
+//nolint:gocognit // multi-node setup + per-node status assertion
+func TestSkipped_TwoHopDownstream(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	dag, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	for _, edge := range []struct{ from, to string }{
+		{StartNode, "A"}, {"A", "B"}, {"B", "C"},
+	} {
+		if err := dag.AddEdge(edge.from, edge.to); err != nil {
+			t.Fatalf("AddEdge %s→%s: %v", edge.from, edge.to, err)
+		}
+	}
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+
+	dag.SetNodeRunner("A", failingRunner{})
+	dag.SetNodeRunner("B", NoopCmd{})
+	dag.SetNodeRunner("C", NoopCmd{})
+
+	dag.ConnectRunner()
+	ctx := context.Background()
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+	dag.Wait(ctx) // expected false
+
+	want := map[string]NodeStatus{
+		"A": NodeStatusFailed,
+		"B": NodeStatusSkipped,
+		"C": NodeStatusSkipped,
+	}
+	for id, wantSt := range want {
+		n := dag.nodes[id]
+		if n == nil {
+			t.Fatalf("node %s not found", id)
+		}
+		if got := n.GetStatus(); got != wantSt {
+			t.Errorf("node %s: want %v, got %v", id, wantSt, got)
+		}
+	}
+	if p := dag.Progress(); p != 1.0 {
+		t.Errorf("Progress after 2-hop skip: want 1.0, got %v", p)
+	}
 }
 
 // TestPostFlight_NilNode verifies that postFlight handles a nil node gracefully,
