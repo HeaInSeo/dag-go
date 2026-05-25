@@ -21,7 +21,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-THRESHOLD="${1:-10}"   # percent — default 10 %
+THRESHOLD="${1:-15}"   # percent — default 15 % (공유 서버 노이즈 허용 마진)
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'; NC='\033[0m'
@@ -32,35 +32,37 @@ error() { echo -e "${RED}[bench_compare] FAIL${NC} $*"; }
 # ── Baselines from docs/PERFORMANCE_HISTORY.md ───────────────────────────────
 # Format: "BenchmarkName baseline_ns_per_op baseline_allocs_per_op"
 # Update this table whenever a new Stage resets the baseline.
+# Stage 15 baseline: 2회 실행 평균값. PreFlight -41% 실질 개선 반영.
+# (ErrDependencyBlocked 정적 센티넬로 교체 → allocs 89→43)
 declare -A BASELINE_NS=(
-    ["BenchmarkCopyDag_Small"]=5098
-    ["BenchmarkCopyDag_Medium"]=209458
-    ["BenchmarkCopyDag_Large"]=7415826
-    ["BenchmarkDetectCycle_Small"]=2135
-    ["BenchmarkDetectCycle_Medium"]=53486
-    ["BenchmarkDetectCycle_Large"]=1543347
-    ["BenchmarkToMermaid_Small"]=8159
-    ["BenchmarkToMermaid_Medium"]=29072
-    ["BenchmarkToMermaid_Large"]=38493
-    ["BenchmarkPreFlight"]=27685
+    ["BenchmarkCopyDag_Small"]=5750
+    ["BenchmarkCopyDag_Medium"]=220000
+    ["BenchmarkCopyDag_Large"]=7508000
+    ["BenchmarkDetectCycle_Small"]=2100
+    ["BenchmarkDetectCycle_Medium"]=58200
+    ["BenchmarkDetectCycle_Large"]=1591000
+    ["BenchmarkToMermaid_Small"]=9250
+    ["BenchmarkToMermaid_Medium"]=31600
+    ["BenchmarkToMermaid_Large"]=41300
+    ["BenchmarkPreFlight"]=18330
 )
 
 declare -A BASELINE_ALLOCS=(
     ["BenchmarkCopyDag_Small"]=54
-    ["BenchmarkCopyDag_Medium"]=1770
-    ["BenchmarkCopyDag_Large"]=53211
+    ["BenchmarkCopyDag_Medium"]=1800
+    ["BenchmarkCopyDag_Large"]=52500
     ["BenchmarkDetectCycle_Small"]=0
     ["BenchmarkDetectCycle_Medium"]=0
     ["BenchmarkDetectCycle_Large"]=0
-    ["BenchmarkToMermaid_Small"]=68
-    ["BenchmarkToMermaid_Medium"]=238
-    ["BenchmarkToMermaid_Large"]=305
-    ["BenchmarkPreFlight"]=89
+    ["BenchmarkToMermaid_Small"]=51
+    ["BenchmarkToMermaid_Medium"]=172
+    ["BenchmarkToMermaid_Large"]=215
+    ["BenchmarkPreFlight"]=43
 )
 
-# ── Special noisy benchmarks: require 3 failures before alerting ──────────────
-# DetectCycle/Small has high relative noise at ~2 μs absolute.
-NOISY_BENCHMARKS="BenchmarkDetectCycle_Small"
+# ── Special noisy benchmarks: 10%~threshold 초과 시 WARN(soft) 처리 ──────────
+# 절대값 ~2–10 μs 구간은 공유 서버 스케줄러 노이즈에 묻힘.
+NOISY_BENCHMARKS="BenchmarkDetectCycle_Small BenchmarkCopyDag_Small BenchmarkToMermaid_Small"
 
 # ── Run benchmarks ────────────────────────────────────────────────────────────
 TMP_DIR=$(mktemp -d)

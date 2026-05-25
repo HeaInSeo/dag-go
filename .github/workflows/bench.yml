@@ -1,9 +1,11 @@
 name: Benchmarks
 
 on:
-  # 벤치마크는 수동으로만 실행한다.
-  # GitHub Actions 러너 환경은 노이즈가 많아 push/PR마다 자동 실행하지 않는다.
-  # 추세 차트는 https://heainseo.github.io/dag-go/dev/bench/ 에서 확인한다.
+  # main 머지 후 자동 실행 — 추세 차트를 자동으로 누적한다.
+  # fail-on-alert: false 이므로 노이즈 오탐이 CI를 막지 않는다.
+  push:
+    branches: [main]
+  # 수동 트리거도 유지 (로컬 재현 확인용)
   workflow_dispatch:
 
 permissions:
