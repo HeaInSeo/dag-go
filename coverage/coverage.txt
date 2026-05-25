@@ -60,7 +60,7 @@ github.com/HeaInSeo/dag-go/dag.go:1637:			reachableFromStart	100.0%
 github.com/HeaInSeo/dag-go/dag.go:1654:			detectCycleDFS		100.0%
 github.com/HeaInSeo/dag-go/dag.go:1678:			detectCycle		100.0%
 github.com/HeaInSeo/dag-go/dag.go:1703:			DetectCycle		100.0%
-github.com/HeaInSeo/dag-go/dag.go:1712:			connectRunner		79.7%
+github.com/HeaInSeo/dag-go/dag.go:1712:			connectRunner		78.4%
 github.com/HeaInSeo/dag-go/dag.go:1855:			merge			100.0%
 github.com/HeaInSeo/dag-go/dag.go:1869:			fanIn			100.0%
 github.com/HeaInSeo/dag-go/dag.go:1916:			ToMermaid		100.0%
@@ -104,4 +104,4 @@ github.com/HeaInSeo/dag-go/safechannel.go:39:		Send			88.9%
 github.com/HeaInSeo/dag-go/safechannel.go:75:		SendBlocking		100.0%
 github.com/HeaInSeo/dag-go/safechannel.go:100:		Close			91.7%
 github.com/HeaInSeo/dag-go/safechannel.go:125:		GetChannel		100.0%
-total:							(statements)		90.5%
+total:							(statements)		90.4%
