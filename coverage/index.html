@@ -57,7 +57,7 @@
 				
 				<option value="file0">github.com/HeaInSeo/dag-go/cli/main.go (0.0%)</option>
 				
-				<option value="file1">github.com/HeaInSeo/dag-go/dag.go (92.5%)</option>
+				<option value="file1">github.com/HeaInSeo/dag-go/dag.go (93.4%)</option>
 				
 				<option value="file2">github.com/HeaInSeo/dag-go/debugonly/debug_stub.go (0.0%)</option>
 				
@@ -878,7 +878,7 @@ func (dag *Dag) StartDag() (*Dag, error) <span class="cov3" title="85">{
 // a structured log entry is emitted so that log-aggregation pipelines can alert
 // on the event.  The cumulative drop count is included in the log field
 // "dropped_total" to make SLO alerting straightforward.
-func (dag *Dag) reportError(err error) <span class="cov4" title="264">{
+func (dag *Dag) reportError(err error) <span class="cov4" title="259">{
         if !dag.Errors.Send(err) </span><span class="cov4" title="192">{
                 n := atomic.AddInt64(&amp;dag.droppedErrors, 1)
                 Log.WithField("dag_id", dag.ID).
@@ -1319,8 +1319,8 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error <span class="cov5" titl
 // A single-node DAG is valid only if that node is StartNode.
 // dag.mu must be held by the caller.
 func checkIsolatedNodes(nodes []*Node) error <span class="cov3" title="65">{
-        for _, n := range nodes </span><span class="cov5" title="1195">{
-                if len(n.children) &gt; 0 || len(n.parent) &gt; 0 </span><span class="cov5" title="1194">{
+        for _, n := range nodes </span><span class="cov5" title="1193">{
+                if len(n.children) &gt; 0 || len(n.parent) &gt; 0 </span><span class="cov5" title="1192">{
                         continue</span>
                 }
                 <span class="cov1" title="1">if len(nodes) == 1 &amp;&amp; n.ID == StartNode </span><span class="cov0" title="0">{
@@ -1338,11 +1338,11 @@ func checkIsolatedNodes(nodes []*Node) error <span class="cov3" title="65">{
 // dag.mu must be held by the caller.
 func checkReachable(dag *Dag, nodes []*Node) error <span class="cov3" title="64">{
         reachable := reachableFromStart(dag)
-        for _, n := range nodes </span><span class="cov5" title="1191">{
-                if n.ID == StartNode </span><span class="cov3" title="64">{
+        for _, n := range nodes </span><span class="cov5" title="1189">{
+                if n.ID == StartNode </span><span class="cov3" title="63">{
                         continue</span>
                 }
-                <span class="cov5" title="1127">if !reachable[n.ID] </span><span class="cov1" title="1">{
+                <span class="cov5" title="1126">if !reachable[n.ID] </span><span class="cov1" title="1">{
                         return fmt.Errorf("node %q is not reachable from start_node", n.ID)
                 }</span>
         }
@@ -1753,7 +1753,7 @@ func (dag *Dag) Wait(ctx context.Context) bool <span class="cov3" title="63">{
                 mergeResult &lt;- dag.merge(waitCtx)
         }</span>()
 
-        <span class="cov3" title="62">for </span><span class="cov7" title="60470">{
+        <span class="cov3" title="62">for </span><span class="cov7" title="60486">{
                 select </span>{
                 case ok := &lt;-mergeResult:<span class="cov0" title="0">
                         // merge 함수가 완료되어 결과를 반환한 경우,
@@ -1762,13 +1762,13 @@ func (dag *Dag) Wait(ctx context.Context) bool <span class="cov3" title="63">{
                                 return false
                         }</span>
                         // merge 함수 결과가 true 면 계속 진행한다.
-                case c, ok := &lt;-dag.NodesResult.GetChannel():<span class="cov7" title="60468">
+                case c, ok := &lt;-dag.NodesResult.GetChannel():<span class="cov7" title="60484">
                         if !ok </span><span class="cov0" title="0">{
                                 // 채널이 종료되면 실패 처리.
                                 return false
                         }</span>
                         // EndNode 에 대한 상태만 체크함.
-                        <span class="cov7" title="60468">if c.nodeID == EndNode </span><span class="cov4" title="166">{
+                        <span class="cov7" title="60484">if c.nodeID == EndNode </span><span class="cov4" title="166">{
                                 // Save fields before returning c to the pool, because
                                 // releasePrintStatus zeroes the struct fields.
                                 rStatus := c.rStatus
@@ -1782,7 +1782,7 @@ func (dag *Dag) Wait(ctx context.Context) bool <span class="cov3" title="63">{
                                 <span class="cov4" title="159">if rStatus == FlightEnd </span><span class="cov3" title="53">{
                                         return true
                                 }</span>
-                        } else<span class="cov7" title="60302"> {
+                        } else<span class="cov7" title="60318"> {
                                 releasePrintStatus(c)
                         }</span>
                 case &lt;-waitCtx.Done():<span class="cov1" title="2">
@@ -1815,7 +1815,7 @@ type dfsState struct {
 
 // dfsStatePool provides reusable dfsState objects for detectCycle.
 var dfsStatePool = sync.Pool{
-        New: func() any <span class="cov2" title="21">{
+        New: func() any <span class="cov2" title="17">{
                 return &amp;dfsState{
                         visited:  make(map[string]bool),
                         recStack: make(map[string]bool),
@@ -1843,18 +1843,18 @@ func reachableFromStart(dag *Dag) map[string]bool <span class="cov3" title="64">
 }
 
 // detectCycleDFS detects cycles using DFS.
-func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool <span class="cov5" title="1733">{
+func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool <span class="cov5" title="2129">{
         if recStack[node.ID] </span><span class="cov1" title="4">{
                 return true
         }</span>
-        <span class="cov5" title="1729">if visited[node.ID] </span><span class="cov4" title="524">{
+        <span class="cov5" title="2125">if visited[node.ID] </span><span class="cov5" title="919">{
                 return false
         }</span>
-        <span class="cov5" title="1205">visited[node.ID] = true
+        <span class="cov5" title="1206">visited[node.ID] = true
         recStack[node.ID] = true
 
-        for _, child := range node.children </span><span class="cov5" title="1154">{
-                if detectCycleDFS(child, visited, recStack) </span><span class="cov2" title="10">{
+        for _, child := range node.children </span><span class="cov5" title="1155">{
+                if detectCycleDFS(child, visited, recStack) </span><span class="cov2" title="11">{
                         return true
                 }</span>
         }
@@ -1878,7 +1878,7 @@ func detectCycle(dag *Dag) bool <span class="cov3" title="66">{
         // Traverse dag.nodes directly — no copyDag needed because the caller
         // guarantees dag.mu is held (FinishDag holds Lock; DetectCycle holds RLock).
         for _, node := range dag.nodes </span><span class="cov5" title="1199">{
-                if !state.visited[node.ID] </span><span class="cov4" title="579">{
+                if !state.visited[node.ID] </span><span class="cov5" title="974">{
                         if detectCycleDFS(node, state.visited, state.recStack) </span><span class="cov1" title="4">{
                                 return true
                         }</span>
@@ -1921,7 +1921,7 @@ func connectRunner(n *Node) <span class="cov7" title="20228">{
                 if n.parentDag != nil </span><span class="cov7" title="20214">{
                         policy = n.parentDag.Config.ErrorPolicy
                 }</span>
-                <span class="cov7" title="20214">if policy == ErrorPolicyFailFast &amp;&amp; !n.CheckParentsStatus() </span><span class="cov0" title="0">{
+                <span class="cov7" title="20214">if policy == ErrorPolicyFailFast &amp;&amp; !n.CheckParentsStatus() </span><span class="cov1" title="5">{
                         ps := newPrintStatus(DependencySkipped, n.ID)
                         sendResult(ps)
                         n.notifyChildren(ctx, Failed)
@@ -1932,22 +1932,22 @@ func connectRunner(n *Node) <span class="cov7" title="20228">{
 
                 // Pending → Running: guarded CAS — rejects the transition if the node is
                 // not Pending (e.g. already Skipped by a concurrent parent failure).
-                <span class="cov7" title="20214">if ok := n.TransitionStatus(NodeStatusPending, NodeStatusRunning); !ok </span><span class="cov0" title="0">{
+                <span class="cov7" title="20209">if ok := n.TransitionStatus(NodeStatusPending, NodeStatusRunning); !ok </span><span class="cov0" title="0">{
                         Log.Warnf("connectRunner: Pending→Running rejected for node %s (status=%v)", n.ID, n.GetStatus())
                 }</span>
 
                 // preFlight phase — waits for all parent signals using the caller ctx only.
                 // No execution budget is consumed here: dependency wait must not reduce
                 // the time available for the node's own work (inFlight).
-                <span class="cov7" title="20214">ps, preflightErr := preFlight(ctx, n)
-                if ps.rStatus == PreflightFailed </span><span class="cov2" title="16">{
-                        if errors.Is(preflightErr, ErrDependencyBlocked) </span><span class="cov2" title="14">{
+                <span class="cov7" title="20209">ps, preflightErr := preFlight(ctx, n)
+                if ps.rStatus == PreflightFailed </span><span class="cov2" title="11">{
+                        if errors.Is(preflightErr, ErrDependencyBlocked) </span><span class="cov2" title="9">{
                                 // Parent failed or was skipped — this node never ran.
                                 // Transition to Skipped (not Failed): the node itself did nothing wrong.
                                 if ok := n.TransitionStatus(NodeStatusRunning, NodeStatusSkipped); !ok </span><span class="cov0" title="0">{
                                         Log.Warnf("connectRunner: Running→Skipped rejected for node %s (status=%v)", n.ID, n.GetStatus())
                                 }</span>
-                                <span class="cov2" title="14">depPs := newPrintStatus(DependencySkipped, n.ID)
+                                <span class="cov2" title="9">depPs := newPrintStatus(DependencySkipped, n.ID)
                                 sendResult(depPs)
                                 releasePrintStatus(depPs)</span>
                         } else<span class="cov1" title="2"> {
@@ -1957,7 +1957,7 @@ func connectRunner(n *Node) <span class="cov7" title="20228">{
                                 }</span>
                                 <span class="cov1" title="2">sendResult(ps)</span>
                         }
-                        <span class="cov2" title="16">n.notifyChildren(ctx, Failed)
+                        <span class="cov2" title="11">n.notifyChildren(ctx, Failed)
                         releasePrintStatus(ps)
                         n.MarkCompleted()
                         return</span>
@@ -2063,13 +2063,13 @@ func fanIn(ctx context.Context, channels []*SafeChannel[*printStatus], merged *S
 
         for _, sc := range channels </span><span class="cov7" title="20214">{
                 eg.Go(func() error </span><span class="cov7" title="20214">{
-                        for val := range sc.GetChannel() </span><span class="cov7" title="60537">{
-                                if !merged.SendBlocking(egCtx, val) </span><span class="cov3" title="47">{
+                        for val := range sc.GetChannel() </span><span class="cov7" title="60542">{
+                                if !merged.SendBlocking(egCtx, val) </span><span class="cov3" title="39">{
                                         releasePrintStatus(val)
                                         return egCtx.Err()
                                 }</span>
                         }
-                        <span class="cov7" title="20167">return nil</span>
+                        <span class="cov7" title="20175">return nil</span>
                 })
         }
 
@@ -2327,14 +2327,14 @@ func copyDag(original *Dag) (map[string]*Node, []*Edge) <span class="cov2" title
                 newNode.parent = make([]*Node, 0, len(n.parent))
                 newNode.children = make([]*Node, 0, len(n.children))
                 // 부모 노드 연결
-                for _, parent := range n.parent </span><span class="cov4" title="426">{
-                        if copiedParent, ok := newNodes[parent.ID]; ok </span><span class="cov4" title="426">{
+                for _, parent := range n.parent </span><span class="cov4" title="385">{
+                        if copiedParent, ok := newNodes[parent.ID]; ok </span><span class="cov4" title="385">{
                                 newNode.parent = append(newNode.parent, copiedParent)
                         }</span>
                 }
                 // 자식 노드 연결
-                <span class="cov4" title="180">for _, child := range n.children </span><span class="cov4" title="426">{
-                        if copiedChild, ok := newNodes[child.ID]; ok </span><span class="cov4" title="426">{
+                <span class="cov4" title="180">for _, child := range n.children </span><span class="cov4" title="385">{
+                        if copiedChild, ok := newNodes[child.ID]; ok </span><span class="cov4" title="385">{
                                 newNode.children = append(newNode.children, copiedChild)
                         }</span>
                 }
@@ -2342,7 +2342,7 @@ func copyDag(original *Dag) (map[string]*Node, []*Edge) <span class="cov2" title
 
         // 3. 간선(Edge) 복사: parentID, childID만 복사
         <span class="cov2" title="9">newEdges := make([]*Edge, len(original.edges))
-        for i, e := range original.edges </span><span class="cov4" title="426">{
+        for i, e := range original.edges </span><span class="cov4" title="385">{
                 newEdges[i] = &amp;Edge{
                         parentID: e.parentID,
                         childID:  e.childID,
@@ -2445,7 +2445,7 @@ func (n *Node) SetStatus(status NodeStatus) <span class="cov3" title="16">{
 }</span>
 
 // GetStatus returns the node's current status under the read lock.
-func (n *Node) GetStatus() NodeStatus <span class="cov9" title="40181">{
+func (n *Node) GetStatus() NodeStatus <span class="cov9" title="40180">{
         n.mu.RLock()
         defer n.mu.RUnlock()
         return n.status
@@ -2459,11 +2459,11 @@ func (n *Node) GetStatus() NodeStatus <span class="cov9" title="40181">{
 //        Pending  → Running | Skipped
 //        Running  → Succeeded | Failed
 //        Succeeded, Failed, Skipped → (terminal; no outgoing transitions)
-func isValidTransition(from, to NodeStatus) bool <span class="cov9" title="41041">{
+func isValidTransition(from, to NodeStatus) bool <span class="cov9" title="41036">{
         switch from </span>{
         case NodeStatusPending:<span class="cov8" title="20519">
                 return to == NodeStatusRunning || to == NodeStatusSkipped</span>
-        case NodeStatusRunning:<span class="cov8" title="20319">
+        case NodeStatusRunning:<span class="cov8" title="20314">
                 // Running→Skipped is permitted: a node that entered preFlight may still
                 // be determined to be dependency-blocked (ErrDependencyBlocked) before
                 // any user code runs, making Skipped the correct terminal state.
@@ -2481,21 +2481,21 @@ func isValidTransition(from, to NodeStatus) bool <span class="cov9" title="41041
 //
 // This prevents illegal backwards moves such as Failed→Succeeded.
 // Use SetStatus only when an unconditional override is explicitly required.
-func (n *Node) TransitionStatus(from, to NodeStatus) bool <span class="cov9" title="41041">{
+func (n *Node) TransitionStatus(from, to NodeStatus) bool <span class="cov9" title="41036">{
         if !isValidTransition(from, to) </span><span class="cov5" title="204">{
                 return false
         }</span>
-        <span class="cov9" title="40837">n.mu.Lock()
+        <span class="cov9" title="40832">n.mu.Lock()
         defer n.mu.Unlock()
         if n.status != from </span><span class="cov5" title="399">{
                 return false
         }</span>
-        <span class="cov9" title="40438">n.status = to
+        <span class="cov9" title="40433">n.status = to
         return true</span>
 }
 
 // SetSucceed sets the succeed flag under the write lock.
-func (n *Node) SetSucceed(val bool) <span class="cov8" title="20470">{
+func (n *Node) SetSucceed(val bool) <span class="cov8" title="20465">{
         n.mu.Lock()
         defer n.mu.Unlock()
         n.succeed = val
@@ -2514,14 +2514,14 @@ func (n *Node) IsSucceed() bool <span class="cov9" title="60311">{
 // The Pending→Skipped transition is guarded by TransitionStatus so that a node
 // in an unexpected state is never silently overwritten.
 func (n *Node) CheckParentsStatus() bool <span class="cov8" title="20212">{
-        for _, parent := range n.parent </span><span class="cov9" title="40149">{
+        for _, parent := range n.parent </span><span class="cov9" title="40148">{
                 st := parent.GetStatus()
-                if st == NodeStatusFailed || st == NodeStatusSkipped </span><span class="cov1" title="2">{
+                if st == NodeStatusFailed || st == NodeStatusSkipped </span><span class="cov2" title="7">{
                         n.TransitionStatus(NodeStatusPending, NodeStatusSkipped)
                         return false
                 }</span>
         }
-        <span class="cov8" title="20210">return true</span>
+        <span class="cov8" title="20205">return true</span>
 }
 
 // MarkCompleted increments the parent DAG's completed-node counter.
@@ -2538,7 +2538,7 @@ type NodeError struct {
         Err    error
 }
 
-func (e *NodeError) Error() string <span class="cov3" title="29">{
+func (e *NodeError) Error() string <span class="cov3" title="24">{
         return fmt.Sprintf("node %s failed in %s phase: %v", e.NodeID, e.Phase, e.Err)
 }</span>
 
@@ -2554,15 +2554,15 @@ func (e *NodeError) Unwrap() error <span class="cov2" title="4">{
 func parentReceiverFunc(
         egCtx context.Context, nodeID string, k int,
         sc *SafeChannel[runningStatus], policy ErrorPolicy, pprofEnabled bool,
-) func() error <span class="cov9" title="40245">{
-        return func() error </span><span class="cov9" title="40245">{
+) func() error <span class="cov9" title="40239">{
+        return func() error </span><span class="cov9" title="40239">{
                 applyPreflightLabels(egCtx, pprofEnabled, nodeID, k)
                 select </span>{
-                case result := &lt;-sc.GetChannel():<span class="cov9" title="40239">
-                        if result == Failed &amp;&amp; policy == ErrorPolicyFailFast </span><span class="cov3" title="16">{
+                case result := &lt;-sc.GetChannel():<span class="cov9" title="40233">
+                        if result == Failed &amp;&amp; policy == ErrorPolicyFailFast </span><span class="cov2" title="11">{
                                 return ErrDependencyBlocked
                         }</span>
-                        <span class="cov9" title="40223">return nil</span>
+                        <span class="cov9" title="40222">return nil</span>
                 case &lt;-egCtx.Done():<span class="cov2" title="6">
                         return egCtx.Err()</span>
                 }
@@ -2579,7 +2579,7 @@ func parentReceiverFunc(
 // parent channel immediately.  Limiting concurrency here would leave some parent
 // channels without a receiver, creating backpressure against postFlight even when
 // the channel is buffered.  Fan-in policy limits belong at the DAG validation layer.
-func preFlight(ctx context.Context, n *Node) (*printStatus, error) <span class="cov8" title="20221">{
+func preFlight(ctx context.Context, n *Node) (*printStatus, error) <span class="cov8" title="20216">{
         if n == nil </span><span class="cov0" title="0">{
                 return newPrintStatus(PreflightFailed, noNodeID), nil
         }</span>
@@ -2587,19 +2587,19 @@ func preFlight(ctx context.Context, n *Node) (*printStatus, error) <span class="
         // Build an errgroup using the caller's context directly.
         // No execution timeout is applied here — dependency wait must not consume
         // the node's execution budget. See connectRunner for where timeouts are applied.
-        <span class="cov8" title="20221">eg, egCtx := errgroup.WithContext(ctx)
+        <span class="cov8" title="20216">eg, egCtx := errgroup.WithContext(ctx)
 
         // Snapshot config values before launching goroutines.
         // With ContinueOnError, a Failed parent signal is not treated as a preFlight
         // error — the child always proceeds to inFlight regardless of parent outcome.
         policy := ErrorPolicyFailFast
         pprofEnabled := false
-        if n.parentDag != nil </span><span class="cov8" title="20214">{
+        if n.parentDag != nil </span><span class="cov8" title="20209">{
                 policy = n.parentDag.Config.ErrorPolicy
                 pprofEnabled = n.parentDag.Config.EnablePprofLabels
         }</span>
 
-        <span class="cov8" title="20221">for k, sc := range n.parentVertex </span><span class="cov9" title="40245">{
+        <span class="cov8" title="20216">for k, sc := range n.parentVertex </span><span class="cov9" title="40239">{
                 if sc == nil </span><span class="cov0" title="0">{
                         // parentVertex must never be nil — this indicates a construction bug.
                         // Inject an error goroutine so the errgroup cancels egCtx, which
@@ -2612,23 +2612,23 @@ func preFlight(ctx context.Context, n *Node) (*printStatus, error) <span class="
                         }</span>)
                         <span class="cov0" title="0">break</span>
                 }
-                <span class="cov9" title="40245">eg.Go(parentReceiverFunc(egCtx, n.ID, k, sc, policy, pprofEnabled))</span>
+                <span class="cov9" title="40239">eg.Go(parentReceiverFunc(egCtx, n.ID, k, sc, policy, pprofEnabled))</span>
         }
 
-        <span class="cov8" title="20221">err := eg.Wait()
+        <span class="cov8" title="20216">err := eg.Wait()
         if err == nil </span><span class="cov8" title="20202">{
                 n.SetSucceed(true)
                 Log.Println("Preflight", n.ID)
                 return newPrintStatus(Preflight, n.ID), nil
         }</span>
 
-        <span class="cov3" title="19">nodeErr := &amp;NodeError{NodeID: n.ID, Phase: "preflight", Err: err}
+        <span class="cov3" title="14">nodeErr := &amp;NodeError{NodeID: n.ID, Phase: "preflight", Err: err}
         Log.Println(nodeErr.Error())
-        if n.parentDag != nil </span><span class="cov3" title="16">{
+        if n.parentDag != nil </span><span class="cov2" title="11">{
                 n.parentDag.reportError(nodeErr)
         }</span>
 
-        <span class="cov3" title="19">n.SetSucceed(false)
+        <span class="cov3" title="14">n.SetSucceed(false)
         Log.Println("Preflight failed for node", n.ID, "error:", err)
         return newPrintStatus(PreflightFailed, n.ID), err</span>
 }
@@ -2730,13 +2730,13 @@ func (n *Node) notifyChildren(ctx context.Context, st runningStatus) <span class
 
 // statusPool is a sync.Pool for printStatus objects to reduce allocations.
 var statusPool = sync.Pool{
-        New: func() interface{} <span class="cov6" title="784">{
+        New: func() interface{} <span class="cov5" title="560">{
                 return &amp;printStatus{}
         }</span>,
 }
 
 // newPrintStatus acquires a printStatus from the pool and initialises it.
-func newPrintStatus(status runningStatus, nodeID string) *printStatus <span class="cov10" title="121225">{
+func newPrintStatus(status runningStatus, nodeID string) *printStatus <span class="cov10" title="121220">{
         ps := statusPool.Get().(*printStatus)
         ps.rStatus = status
         ps.nodeID = nodeID
@@ -2744,7 +2744,7 @@ func newPrintStatus(status runningStatus, nodeID string) *printStatus <span clas
 }</span>
 
 // releasePrintStatus resets and returns ps to the pool.
-func releasePrintStatus(ps *printStatus) <span class="cov9" title="121133">{
+func releasePrintStatus(ps *printStatus) <span class="cov9" title="121136">{
         ps.rStatus = 0
         ps.nodeID = ""
         statusPool.Put(ps)
@@ -2759,7 +2759,7 @@ import "context"
 
 // applyPreflightLabels is a no-op in non-pprof builds.
 // The compiler inlines and eliminates this call entirely — zero allocation, zero branch.
-func applyPreflightLabels(_ context.Context, _ bool, _ string, _ int) {<span class="cov10" title="40245">}</span>
+func applyPreflightLabels(_ context.Context, _ bool, _ string, _ int) {<span class="cov10" title="40239">}</span>
 </pre>
 		
 		<pre class="file" id="file5" style="display: none">package dag_go
@@ -2888,7 +2888,7 @@ func NewSafeChannelGen[T any](buffer int) *SafeChannel[T] <span class="cov9" tit
 //
 // The sc.done check closes the narrow race window between Close() signalling
 // done (before acquiring the write lock) and setting sc.closed = true.
-func (sc *SafeChannel[T]) Send(value T) bool <span class="cov5" title="361">{
+func (sc *SafeChannel[T]) Send(value T) bool <span class="cov5" title="356">{
         sc.mu.RLock()
         defer sc.mu.RUnlock()
 
@@ -2896,13 +2896,13 @@ func (sc *SafeChannel[T]) Send(value T) bool <span class="cov5" title="361">{
                 return false
         }</span>
         // Non-blocking check: if Close() has already begun, treat as closed.
-        <span class="cov5" title="359">select </span>{
+        <span class="cov5" title="354">select </span>{
         case &lt;-sc.done:<span class="cov0" title="0">
                 return false</span>
-        default:<span class="cov5" title="359"></span>
+        default:<span class="cov5" title="354"></span>
         }
-        <span class="cov5" title="359">select </span>{
-        case sc.ch &lt;- value:<span class="cov4" title="167">
+        <span class="cov5" title="354">select </span>{
+        case sc.ch &lt;- value:<span class="cov4" title="162">
                 return true</span>
         default:<span class="cov4" title="192">
                 return false</span>
@@ -2924,19 +2924,19 @@ func (sc *SafeChannel[T]) Send(value T) bool <span class="cov5" title="361">{
 // select when Close() is called concurrently and the buffer is full — this
 // prevents a deadlock where Close() cannot acquire the write lock because
 // SendBlocking holds the read lock indefinitely.
-func (sc *SafeChannel[T]) SendBlocking(ctx context.Context, value T) bool <span class="cov10" title="161298">{
+func (sc *SafeChannel[T]) SendBlocking(ctx context.Context, value T) bool <span class="cov10" title="161303">{
         sc.mu.RLock()
         defer sc.mu.RUnlock()
 
-        if sc.closed </span><span class="cov3" title="34">{
+        if sc.closed </span><span class="cov3" title="21">{
                 return false
         }</span>
-        <span class="cov9" title="161264">select </span>{
-        case sc.ch &lt;- value:<span class="cov9" title="161241">
+        <span class="cov9" title="161282">select </span>{
+        case sc.ch &lt;- value:<span class="cov9" title="161254">
                 return true</span>
-        case &lt;-ctx.Done():<span class="cov3" title="22">
+        case &lt;-ctx.Done():<span class="cov3" title="26">
                 return false</span>
-        case &lt;-sc.done:<span class="cov1" title="1">
+        case &lt;-sc.done:<span class="cov1" title="2">
                 return false</span>
         }
 }
@@ -2974,7 +2974,7 @@ func (sc *SafeChannel[T]) Close() (err error) <span class="cov9" title="60539">{
 }
 
 // GetChannel returns the underlying channel for range/select operations.
-func (sc *SafeChannel[T]) GetChannel() chan T <span class="cov9" title="120950">{
+func (sc *SafeChannel[T]) GetChannel() chan T <span class="cov9" title="120960">{
         return sc.ch
 }</span>
 </pre>
