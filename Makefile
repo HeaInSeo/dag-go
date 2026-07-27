@@ -34,14 +34,14 @@ BENCH_THRESHOLD ?= 10
 
 test:
 	@mkdir -p "$(GOCACHE_DIR)" "$(GOTMPDIR)"
-	$(GOENV) go test -v -race -cover $(PKGS_ALL)
+	$(GOENV) go test -v -race -cover -shuffle=on -count=1 $(PKGS_ALL)
 
 # ── Coverage ──────────────────────────────────────────────────────────────────
 
 # Writes cover.out + coverage.txt to reports/.
 coverage:
 	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
-	$(GOENV) go test $(PKGS_CORE) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
+	$(GOENV) go test -shuffle=on -count=1 $(PKGS_CORE) -coverprofile="$(REPORT_DIR)/cover.out" -covermode=atomic
 	go tool cover -func="$(REPORT_DIR)/cover.out" | tee "$(REPORT_DIR)/coverage.txt"
 
 # ── Benchmarks ────────────────────────────────────────────────────────────────
