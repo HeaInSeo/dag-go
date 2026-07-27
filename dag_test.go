@@ -1236,7 +1236,7 @@ func TestSendBlocking_BlocksThenDelivers(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sc.SendBlocking(ctx, 123) //nolint:errcheck
+		sc.SendBlocking(ctx, 123) //nolint:errcheck,gosec
 	}()
 
 	// Give the goroutine time to block on the send.
@@ -1281,7 +1281,7 @@ func TestDroppedErrors_Counter(t *testing.T) {
 
 	// Drain the channel so we can call Reset (Reset creates a new Errors channel).
 	<-dag.Errors.GetChannel()
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 
 	// Manually reset just the counter (Reset requires a fully initialised DAG;
 	// test the atomic reset directly).
@@ -1314,7 +1314,7 @@ func TestWorkerPool_NodeTask(t *testing.T) {
 		// Attach a runner that records the node ID and drains the channel.
 		n.runner = func(_ context.Context, res *SafeChannel[*printStatus]) {
 			results <- n.ID
-			res.Close() //nolint:errcheck
+			res.Close() //nolint:errcheck,gosec
 		}
 
 		pool.Submit(nodeTask{node: n, sc: sc, ctx: ctx})
@@ -1500,7 +1500,7 @@ func TestDroppedErrors_UnderHighLoad(t *testing.T) {
 	for len(ch) > 0 {
 		<-ch
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestSendBlocking_GoroutineLeak_ContextCancel verifies that a goroutine
@@ -1515,7 +1515,7 @@ func TestSendBlocking_GoroutineLeak_ContextCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		sc.SendBlocking(ctx, 42) //nolint:errcheck
+		sc.SendBlocking(ctx, 42) //nolint:errcheck,gosec
 	}()
 
 	// Give the goroutine time to reach the blocking select.
@@ -1530,7 +1530,7 @@ func TestSendBlocking_GoroutineLeak_ContextCancel(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("goroutine leaked: SendBlocking did not return after context cancel")
 	}
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 }
 
 // TestWait_ContextCancellation exercises the waitCtx.Done() branch inside
@@ -1715,7 +1715,7 @@ func TestCollectErrors_CtxCancelled(t *testing.T) {
 		t.Errorf("expected 0 errors from cancelled context, got %d", len(errs))
 	}
 	// Cleanup.
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestCollectErrors_Timeout verifies that collectErrors returns after
@@ -1739,7 +1739,7 @@ func TestCollectErrors_Timeout(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Errorf("collectErrors took too long: %v (expected ≤ 200ms)", elapsed)
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // ==================== Stage 13: Coverage Tests ====================
@@ -1898,9 +1898,9 @@ func TestSafeChannel_Close_Twice(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	sc := NewSafeChannelGen[int](1)
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 	// Second close must not panic.
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 }
 
 // TestSafeChannel_Send_Closed verifies that Send returns false when the
@@ -1909,7 +1909,7 @@ func TestSafeChannel_Send_Closed(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	sc := NewSafeChannelGen[int](1)
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 
 	ok := sc.Send(42)
 	if ok {
@@ -2129,7 +2129,7 @@ func TestSafeChannel_SendBlocking_Unblocks(t *testing.T) {
 	if result {
 		t.Error("expected SendBlocking to return false on cancelled context")
 	}
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 }
 
 // ==================== Stage 13: Coverage Path Tests ====================
@@ -2267,7 +2267,7 @@ func TestAddEdge_EmptyFrom(t *testing.T) {
 	if err := dag.AddEdge("", "B"); err == nil {
 		t.Error("expected AddEdge to return error for empty from-node")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestAddEdge_EmptyTo verifies that AddEdge returns an error when the
@@ -2283,7 +2283,7 @@ func TestAddEdge_EmptyTo(t *testing.T) {
 	if err := dag.AddEdge(StartNode, ""); err == nil {
 		t.Error("expected AddEdge to return error for empty to-node")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestAddEdge_DuplicateEdge verifies that AddEdge returns an error when the
@@ -2303,7 +2303,7 @@ func TestAddEdge_DuplicateEdge(t *testing.T) {
 	if err := dag.AddEdge(StartNode, "A"); err == nil {
 		t.Error("expected second AddEdge to return error for duplicate edge")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestAddEdgeIfNodesExist_EmptyFrom verifies that AddEdgeIfNodesExist returns
@@ -2319,7 +2319,7 @@ func TestAddEdgeIfNodesExist_EmptyFrom(t *testing.T) {
 	if err := dag.AddEdgeIfNodesExist("", "B"); err == nil {
 		t.Error("expected AddEdgeIfNodesExist to return error for empty from-node")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestInFlight_NilNode verifies that inFlight returns InFlightFailed status
@@ -2376,7 +2376,7 @@ func TestCollectErrors_ZeroDrainTimeout(t *testing.T) {
 	if elapsed > time.Second {
 		t.Errorf("collectErrors took too long: %v (expected <1s)", elapsed)
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // ==================== Stage 13: Error Path Coverage Tests ====================
@@ -2453,7 +2453,7 @@ func TestFinishDag_NoNodes(t *testing.T) {
 	if err := dag.FinishDag(); err == nil {
 		t.Error("expected FinishDag to return error for empty DAG")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestStartDag_Duplicate verifies that calling StartDag twice returns an error
@@ -2495,7 +2495,7 @@ func TestFinishDag_IsolatedNode(t *testing.T) {
 	if err := dag.FinishDag(); err == nil {
 		t.Error("expected FinishDag to return error for isolated node 'orphan'")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestProgress_EmptyDAG verifies that Progress() returns 0.0 when no nodes have
@@ -2505,7 +2505,7 @@ func TestProgress_EmptyDAG(t *testing.T) {
 	if got := dag.Progress(); got != 0.0 {
 		t.Errorf("expected Progress()=0.0 for empty DAG, got %f", got)
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestProgress_ReachesOneOnFailure verifies that Progress() reaches 1.0 after
@@ -2664,8 +2664,8 @@ func TestCopyDag_WithStartAndEndNode(t *testing.T) {
 		t.Errorf("copied EndNode ID = %q, want %q", copied.endNode.ID, EndNode)
 	}
 
-	original.Errors.Close() //nolint:errcheck
-	copied.Errors.Close()   //nolint:errcheck
+	original.Errors.Close() //nolint:errcheck,gosec
+	copied.Errors.Close()   //nolint:errcheck,gosec
 }
 
 // TestAddEndNode_NilFrom verifies that addEndNode returns an error when fromNode is nil.
@@ -2676,7 +2676,7 @@ func TestAddEndNode_NilFrom(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nil fromNode, got nil")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestAddEndNode_NilTo verifies that addEndNode returns an error when toNode is nil.
@@ -2687,7 +2687,7 @@ func TestAddEndNode_NilTo(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for nil toNode, got nil")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestInFlight_DagDefaultTimeout verifies that a positive DefaultTimeout is stored
@@ -2766,7 +2766,7 @@ func TestWithDefaultTimeout_NonZeroStoredInConfig(t *testing.T) {
 	if got := dag.Config.DefaultTimeout; got != want {
 		t.Errorf("Config.DefaultTimeout = %v, want %v", got, want)
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestConnectRunner_EmptyDAG exercises the ConnectRunner early-return path
@@ -2776,7 +2776,7 @@ func TestConnectRunner_EmptyDAG(t *testing.T) {
 	if dag.ConnectRunner() {
 		t.Error("ConnectRunner on empty DAG should return false")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestGetReady_EmptyDAG exercises the GetReady early-return path when no nodes
@@ -2786,7 +2786,7 @@ func TestGetReady_EmptyDAG(t *testing.T) {
 	if dag.GetReady(context.Background()) {
 		t.Error("GetReady on empty DAG should return false")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestNotifyChildren_CancelledCtx exercises the Warnf branch in notifyChildren
@@ -2803,7 +2803,7 @@ func TestNotifyChildren_CancelledCtx(t *testing.T) {
 	cancel() // already cancelled → SendBlocking returns false → Warnf is logged
 
 	parent.notifyChildren(ctx, Succeed)
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 }
 
 // TestPostFlight_CancelledCtx exercises the Warnf branch in postFlight when
@@ -2826,7 +2826,7 @@ func TestPostFlight_CancelledCtx(t *testing.T) {
 	if ps.rStatus != PostFlight {
 		t.Errorf("expected PostFlight, got %v", ps.rStatus)
 	}
-	sc.Close() //nolint:errcheck
+	sc.Close() //nolint:errcheck,gosec
 }
 
 // TestAddEndNode_ExistingEdge exercises the Fault/Exist guard in addEndNode by
@@ -2847,7 +2847,7 @@ func TestAddEndNode_ExistingEdge(t *testing.T) {
 	if err := dag.addEndNode(from, to); err == nil {
 		t.Error("duplicate addEndNode should return error")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestFinishDag_SingleNonStartNode covers the FinishDag path where there is
@@ -2856,13 +2856,13 @@ func TestFinishDag_SingleNonStartNode(t *testing.T) {
 	dag := NewDag()
 	// Bypass StartDag; inject a single non-StartNode directly.
 	dag.mu.Lock()
-	dag.createNode("solo-but-not-start") //nolint:errcheck
+	dag.createNode("solo-but-not-start") //nolint:errcheck,gosec
 	dag.mu.Unlock()
 
 	if err := dag.FinishDag(); err == nil {
 		t.Error("FinishDag should reject a single non-StartNode")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestCloseChannels_AfterDoubleWait verifies that calling closeChannels
@@ -3144,9 +3144,9 @@ func TestCollectErrors_DrainOnChannelClose(t *testing.T) {
 	// Send two errors into the channel before closing it.
 	err1 := fmt.Errorf("err-one")
 	err2 := fmt.Errorf("err-two")
-	dag.Errors.SendBlocking(context.Background(), err1) //nolint:errcheck
-	dag.Errors.SendBlocking(context.Background(), err2) //nolint:errcheck
-	dag.Errors.Close()                                  //nolint:errcheck
+	dag.Errors.SendBlocking(context.Background(), err1) //nolint:errcheck,gosec
+	dag.Errors.SendBlocking(context.Background(), err2) //nolint:errcheck,gosec
+	dag.Errors.Close()                                  //nolint:errcheck,gosec
 
 	start := time.Now()
 	errs := dag.collectErrors(context.Background())
@@ -3285,7 +3285,7 @@ func TestGetReady_DoubleCall_NoExtraGoroutines(t *testing.T) {
 	if !dag.Start() {
 		t.Fatal("Start failed")
 	}
-	dag.Wait(ctx) //nolint:errcheck
+	dag.Wait(ctx) //nolint:errcheck,gosec
 }
 
 // TestFinishDag_CycleLeaksNoEndNode verifies that when FinishDag detects a
@@ -3369,7 +3369,7 @@ func TestAddEdge_ReservedEndNodeTarget(t *testing.T) {
 	if err := dag.AddEdge(StartNode, EndNode); err == nil {
 		t.Error("AddEdge(StartNode, EndNode) should return error for reserved target")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestSafeChannel_SendBlocking_UnblocksOnClose verifies that SendBlocking
@@ -3474,7 +3474,7 @@ func TestAddEdge_StartNodeAsTarget_Rejected(t *testing.T) {
 	if err := dag.AddEdgeIfNodesExist("A", StartNode); err == nil {
 		t.Error("AddEdgeIfNodesExist(A, start_node) must return error")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestAddEdge_EndNodeInvolved_Rejected verifies that end_node cannot appear
@@ -3501,7 +3501,7 @@ func TestAddEdge_EndNodeInvolved_Rejected(t *testing.T) {
 			t.Errorf("AddEdgeIfNodesExist(%s, %s) must return error", c[0], c[1])
 		}
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestFinishDag_RejectsNodeNotReachableFromStart verifies that FinishDag
@@ -3529,7 +3529,7 @@ func TestFinishDag_RejectsNodeNotReachableFromStart(t *testing.T) {
 	if finishErr := dag.FinishDag(); finishErr == nil {
 		t.Fatal("FinishDag must reject nodes not reachable from start_node")
 	}
-	dag.Errors.Close() //nolint:errcheck
+	dag.Errors.Close() //nolint:errcheck,gosec
 }
 
 // TestCopyDag_IsExecutable verifies that a CopyDag result can be run through
@@ -3608,7 +3608,7 @@ func TestStart_CalledTwice(t *testing.T) {
 	if dag.Start() {
 		t.Error("second Start should return false")
 	}
-	dag.Wait(ctx) //nolint:errcheck
+	dag.Wait(ctx) //nolint:errcheck,gosec
 }
 
 // TestStartE_CalledTwice verifies that StartE returns a descriptive error on
@@ -3644,7 +3644,7 @@ func TestStartE_CalledTwice(t *testing.T) {
 	if err := dag.StartE(); err == nil {
 		t.Error("second StartE should return error")
 	}
-	dag.Wait(ctx) //nolint:errcheck
+	dag.Wait(ctx) //nolint:errcheck,gosec
 }
 
 // TestReset_WhileRunning_IsNoOp verifies that Reset called while the DAG is
@@ -3722,7 +3722,7 @@ func TestResetE_WhileRunning_ReturnsError(t *testing.T) {
 		t.Error("ResetE should return error while DAG is running")
 	}
 
-	dag.Wait(ctx) //nolint:errcheck
+	dag.Wait(ctx) //nolint:errcheck,gosec
 }
 
 // TestPreFlight_FailureAppearsInDagErrors verifies that when a parent node
@@ -3761,7 +3761,7 @@ func TestPreFlight_FailureAppearsInDagErrors(t *testing.T) {
 	if !dag.Start() {
 		t.Fatal("Start failed")
 	}
-	dag.Wait(ctx) //nolint:errcheck
+	dag.Wait(ctx) //nolint:errcheck,gosec
 
 	// Collect errors from the channel (already closed by Wait).
 	errs := collectDagErrors(dag)
@@ -4161,7 +4161,7 @@ func TestErrorReturnAPI_BasicLifecycle(t *testing.T) {
 		t.Fatalf("WaitE: %v", err)
 	}
 
-	dag.ResetE() //nolint:errcheck
+	dag.ResetE() //nolint:errcheck,gosec
 }
 
 // ==================== Stage 8 — Error Handling Hardening Tests ====================
@@ -4201,9 +4201,9 @@ func TestErrCount_Basic(t *testing.T) {
 		t.Fatalf("initial ErrCount = %d, want 0", got)
 	}
 
-	dag.Errors.Send(fmt.Errorf("err1")) //nolint:errcheck
-	dag.Errors.Send(fmt.Errorf("err2")) //nolint:errcheck
-	dag.Errors.Send(fmt.Errorf("err3")) //nolint:errcheck
+	dag.Errors.Send(fmt.Errorf("err1")) //nolint:errcheck,gosec
+	dag.Errors.Send(fmt.Errorf("err2")) //nolint:errcheck,gosec
+	dag.Errors.Send(fmt.Errorf("err3")) //nolint:errcheck,gosec
 	if got := dag.ErrCount(); got != 3 {
 		t.Fatalf("ErrCount after 3 sends = %d, want 3", got)
 	}
@@ -4369,8 +4369,8 @@ func TestAddEdge_AfterGetReady(t *testing.T) {
 		t.Error("FinishDag after GetReady should return an error (topology is frozen)")
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 }
 
 // TestCopyDag_HasNilStartTrigger verifies that CopyDag produces a copy with a
@@ -4431,8 +4431,8 @@ func TestReset_ClearsStartTrigger(t *testing.T) {
 		t.Error("startTrigger should be non-nil after GetReady")
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 
 	d.Reset()
 	// After Reset, startTrigger must be nil — GetReadyE will re-capture it.
@@ -4475,8 +4475,8 @@ func TestConnectRunnerE_AfterGetReady_ReturnsError(t *testing.T) {
 		t.Error("ConnectRunnerE after GetReady should return an error")
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 }
 
 // ── runner/config freeze policy tests ────────────────────────────────────────
@@ -4531,8 +4531,8 @@ func TestSetContainerCmd_FrozenAfterGetReady(t *testing.T) {
 		t.Error("SetContainerCmd must be no-op after GetReady (running=true)")
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 
 	// Window b: after Wait, before Reset (running=false, nodeResult!=nil).
 	d.SetContainerCmd(sentinel)
@@ -4558,8 +4558,8 @@ func TestSetRunnerResolver_FrozenAfterGetReady(t *testing.T) {
 		t.Error("SetRunnerResolver must be no-op after GetReady (running=true)")
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 
 	// Window b: after Wait, before Reset.
 	d.SetRunnerResolver(resolver)
@@ -4582,8 +4582,8 @@ func TestSetNodeRunner_FrozenAfterGetReady(t *testing.T) {
 		t.Error("SetNodeRunner must return false after GetReady (running=true)")
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 
 	// Window b: after Wait, before Reset.
 	if d.SetNodeRunner("A", NoopCmd{}) {
@@ -4608,8 +4608,8 @@ func TestSetNodeRunners_FrozenAfterGetReady(t *testing.T) {
 		t.Errorf("SetNodeRunners after GetReady: want applied=0 skipped=1, got applied=%d skipped=%d", applied, len(skipped))
 	}
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 
 	// Window b: after Wait, before Reset.
 	applied, _, skipped = d.SetNodeRunners(input)
@@ -4627,8 +4627,8 @@ func TestSetters_UnfrozenAfterReset(t *testing.T) {
 	d, ctx, cancel := buildFrozenDag(t)
 	defer cancel()
 
-	d.Start()   //nolint:errcheck
-	d.Wait(ctx) //nolint:errcheck
+	d.Start()   //nolint:errcheck,gosec
+	d.Wait(ctx) //nolint:errcheck,gosec
 	d.Reset()
 
 	// After Reset, nodeResult==nil and running==false → all setters must work.
