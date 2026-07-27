@@ -26,7 +26,7 @@ func setupNode(id string, numParents int, value runningStatus) *Node {
 		sc := NewSafeChannelGen[runningStatus](1)
 		go func(s *SafeChannel[runningStatus]) {
 			// 랜덤 딜레이 후 값을 전송
-			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.Intn(5)) * time.Millisecond) //nolint:gosec // benchmark timing jitter, not security-sensitive
 			s.Send(value)
 			// 값 전송 후 채널을 닫음
 			if err := s.Close(); err != nil {

@@ -26,8 +26,8 @@ PKGS_SECURITY := . ./cli/... ./debugonly/...
 BENCH_THRESHOLD ?= 10
 
 .PHONY: test coverage fmt bench bench-compare \
-        lint lint-fix lint-depguard lint-security \
-        vuln vuln-all \
+        lint lint-fix lint-depguard lint-security lint-security-check \
+        vuln vuln-check vuln-all \
         golangci-lint govulncheck
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -79,6 +79,10 @@ lint-security: golangci-lint
 	| tee "$(REPORT_DIR)/gosec.txt"; \
 	echo "gosec_exit=$$?" | tee -a "$(REPORT_DIR)/lint-security-summary.txt"
 
+lint-security-check: golangci-lint
+	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
+	$(GOENV) $(GOLANGCI_LINT) run --enable-only gosec $(PKGS_SECURITY) | tee "$(REPORT_DIR)/gosec.txt"
+
 fmt:
 	go fmt $(PKGS_ALL)
 
@@ -89,6 +93,10 @@ vuln: govulncheck
 	@set +e; \
 	$(GOENV) $(GOVULNCHECK) $(PKGS_SECURITY) 2>&1 | tee "$(REPORT_DIR)/govulncheck-core.txt"; \
 	echo "govulncheck_core_exit=$$?" | tee "$(REPORT_DIR)/govulncheck-core.summary"
+
+vuln-check: govulncheck
+	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
+	$(GOENV) $(GOVULNCHECK) $(PKGS_SECURITY) 2>&1 | tee "$(REPORT_DIR)/govulncheck-core.txt"
 
 vuln-all: govulncheck
 	@mkdir -p "$(REPORT_DIR)" "$(GOCACHE_DIR)" "$(GOTMPDIR)"
