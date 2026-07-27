@@ -1319,8 +1319,8 @@ func (dag *Dag) addEndNode(fromNode, toNode *Node) error <span class="cov5" titl
 // A single-node DAG is valid only if that node is StartNode.
 // dag.mu must be held by the caller.
 func checkIsolatedNodes(nodes []*Node) error <span class="cov3" title="65">{
-        for _, n := range nodes </span><span class="cov5" title="1195">{
-                if len(n.children) &gt; 0 || len(n.parent) &gt; 0 </span><span class="cov5" title="1194">{
+        for _, n := range nodes </span><span class="cov5" title="1193">{
+                if len(n.children) &gt; 0 || len(n.parent) &gt; 0 </span><span class="cov5" title="1192">{
                         continue</span>
                 }
                 <span class="cov1" title="1">if len(nodes) == 1 &amp;&amp; n.ID == StartNode </span><span class="cov0" title="0">{
@@ -1338,8 +1338,8 @@ func checkIsolatedNodes(nodes []*Node) error <span class="cov3" title="65">{
 // dag.mu must be held by the caller.
 func checkReachable(dag *Dag, nodes []*Node) error <span class="cov3" title="64">{
         reachable := reachableFromStart(dag)
-        for _, n := range nodes </span><span class="cov5" title="1190">{
-                if n.ID == StartNode </span><span class="cov3" title="63">{
+        for _, n := range nodes </span><span class="cov5" title="1191">{
+                if n.ID == StartNode </span><span class="cov3" title="64">{
                         continue</span>
                 }
                 <span class="cov5" title="1127">if !reachable[n.ID] </span><span class="cov1" title="1">{
@@ -1753,7 +1753,7 @@ func (dag *Dag) Wait(ctx context.Context) bool <span class="cov3" title="63">{
                 mergeResult &lt;- dag.merge(waitCtx)
         }</span>()
 
-        <span class="cov3" title="62">for </span><span class="cov7" title="60483">{
+        <span class="cov3" title="62">for </span><span class="cov7" title="60488">{
                 select </span>{
                 case ok := &lt;-mergeResult:<span class="cov0" title="0">
                         // merge 함수가 완료되어 결과를 반환한 경우,
@@ -1762,13 +1762,13 @@ func (dag *Dag) Wait(ctx context.Context) bool <span class="cov3" title="63">{
                                 return false
                         }</span>
                         // merge 함수 결과가 true 면 계속 진행한다.
-                case c, ok := &lt;-dag.NodesResult.GetChannel():<span class="cov7" title="60481">
+                case c, ok := &lt;-dag.NodesResult.GetChannel():<span class="cov7" title="60486">
                         if !ok </span><span class="cov0" title="0">{
                                 // 채널이 종료되면 실패 처리.
                                 return false
                         }</span>
                         // EndNode 에 대한 상태만 체크함.
-                        <span class="cov7" title="60481">if c.nodeID == EndNode </span><span class="cov4" title="166">{
+                        <span class="cov7" title="60486">if c.nodeID == EndNode </span><span class="cov4" title="166">{
                                 // Save fields before returning c to the pool, because
                                 // releasePrintStatus zeroes the struct fields.
                                 rStatus := c.rStatus
@@ -1782,7 +1782,7 @@ func (dag *Dag) Wait(ctx context.Context) bool <span class="cov3" title="63">{
                                 <span class="cov4" title="159">if rStatus == FlightEnd </span><span class="cov3" title="53">{
                                         return true
                                 }</span>
-                        } else<span class="cov7" title="60315"> {
+                        } else<span class="cov7" title="60320"> {
                                 releasePrintStatus(c)
                         }</span>
                 case &lt;-waitCtx.Done():<span class="cov1" title="2">
@@ -1815,7 +1815,7 @@ type dfsState struct {
 
 // dfsStatePool provides reusable dfsState objects for detectCycle.
 var dfsStatePool = sync.Pool{
-        New: func() any <span class="cov2" title="20">{
+        New: func() any <span class="cov2" title="14">{
                 return &amp;dfsState{
                         visited:  make(map[string]bool),
                         recStack: make(map[string]bool),
@@ -1843,18 +1843,18 @@ func reachableFromStart(dag *Dag) map[string]bool <span class="cov3" title="64">
 }
 
 // detectCycleDFS detects cycles using DFS.
-func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool <span class="cov5" title="1893">{
+func detectCycleDFS(node *Node, visited, recStack map[string]bool) bool <span class="cov5" title="1398">{
         if recStack[node.ID] </span><span class="cov1" title="4">{
                 return true
         }</span>
-        <span class="cov5" title="1889">if visited[node.ID] </span><span class="cov5" title="684">{
+        <span class="cov5" title="1394">if visited[node.ID] </span><span class="cov4" title="188">{
                 return false
         }</span>
-        <span class="cov5" title="1205">visited[node.ID] = true
+        <span class="cov5" title="1206">visited[node.ID] = true
         recStack[node.ID] = true
 
-        for _, child := range node.children </span><span class="cov5" title="1154">{
-                if detectCycleDFS(child, visited, recStack) </span><span class="cov2" title="10">{
+        for _, child := range node.children </span><span class="cov5" title="1155">{
+                if detectCycleDFS(child, visited, recStack) </span><span class="cov2" title="11">{
                         return true
                 }</span>
         }
@@ -1878,7 +1878,7 @@ func detectCycle(dag *Dag) bool <span class="cov3" title="66">{
         // Traverse dag.nodes directly — no copyDag needed because the caller
         // guarantees dag.mu is held (FinishDag holds Lock; DetectCycle holds RLock).
         for _, node := range dag.nodes </span><span class="cov5" title="1199">{
-                if !state.visited[node.ID] </span><span class="cov5" title="739">{
+                if !state.visited[node.ID] </span><span class="cov4" title="243">{
                         if detectCycleDFS(node, state.visited, state.recStack) </span><span class="cov1" title="4">{
                                 return true
                         }</span>
@@ -2063,13 +2063,13 @@ func fanIn(ctx context.Context, channels []*SafeChannel[*printStatus], merged *S
 
         for _, sc := range channels </span><span class="cov7" title="20214">{
                 eg.Go(func() error </span><span class="cov7" title="20214">{
-                        for val := range sc.GetChannel() </span><span class="cov7" title="60542">{
-                                if !merged.SendBlocking(egCtx, val) </span><span class="cov3" title="43">{
+                        for val := range sc.GetChannel() </span><span class="cov7" title="60539">{
+                                if !merged.SendBlocking(egCtx, val) </span><span class="cov3" title="39">{
                                         releasePrintStatus(val)
                                         return egCtx.Err()
                                 }</span>
                         }
-                        <span class="cov7" title="20171">return nil</span>
+                        <span class="cov7" title="20175">return nil</span>
                 })
         }
 
@@ -2327,14 +2327,14 @@ func copyDag(original *Dag) (map[string]*Node, []*Edge) <span class="cov2" title
                 newNode.parent = make([]*Node, 0, len(n.parent))
                 newNode.children = make([]*Node, 0, len(n.children))
                 // 부모 노드 연결
-                for _, parent := range n.parent </span><span class="cov4" title="381">{
-                        if copiedParent, ok := newNodes[parent.ID]; ok </span><span class="cov4" title="381">{
+                for _, parent := range n.parent </span><span class="cov4" title="404">{
+                        if copiedParent, ok := newNodes[parent.ID]; ok </span><span class="cov4" title="404">{
                                 newNode.parent = append(newNode.parent, copiedParent)
                         }</span>
                 }
                 // 자식 노드 연결
-                <span class="cov4" title="180">for _, child := range n.children </span><span class="cov4" title="381">{
-                        if copiedChild, ok := newNodes[child.ID]; ok </span><span class="cov4" title="381">{
+                <span class="cov4" title="180">for _, child := range n.children </span><span class="cov4" title="404">{
+                        if copiedChild, ok := newNodes[child.ID]; ok </span><span class="cov4" title="404">{
                                 newNode.children = append(newNode.children, copiedChild)
                         }</span>
                 }
@@ -2342,7 +2342,7 @@ func copyDag(original *Dag) (map[string]*Node, []*Edge) <span class="cov2" title
 
         // 3. 간선(Edge) 복사: parentID, childID만 복사
         <span class="cov2" title="9">newEdges := make([]*Edge, len(original.edges))
-        for i, e := range original.edges </span><span class="cov4" title="381">{
+        for i, e := range original.edges </span><span class="cov4" title="404">{
                 newEdges[i] = &amp;Edge{
                         parentID: e.parentID,
                         childID:  e.childID,
@@ -2559,10 +2559,10 @@ func parentReceiverFunc(
                 applyPreflightLabels(egCtx, pprofEnabled, nodeID, k)
                 select </span>{
                 case result := &lt;-sc.GetChannel():<span class="cov9" title="40238">
-                        if result == Failed &amp;&amp; policy == ErrorPolicyFailFast </span><span class="cov3" title="15">{
+                        if result == Failed &amp;&amp; policy == ErrorPolicyFailFast </span><span class="cov3" title="16">{
                                 return ErrDependencyBlocked
                         }</span>
-                        <span class="cov9" title="40223">return nil</span>
+                        <span class="cov9" title="40222">return nil</span>
                 case &lt;-egCtx.Done():<span class="cov2" title="6">
                         return egCtx.Err()</span>
                 }
@@ -2730,7 +2730,7 @@ func (n *Node) notifyChildren(ctx context.Context, st runningStatus) <span class
 
 // statusPool is a sync.Pool for printStatus objects to reduce allocations.
 var statusPool = sync.Pool{
-        New: func() interface{} <span class="cov6" title="731">{
+        New: func() interface{} <span class="cov6" title="782">{
                 return &amp;printStatus{}
         }</span>,
 }
@@ -2744,7 +2744,7 @@ func newPrintStatus(status runningStatus, nodeID string) *printStatus <span clas
 }</span>
 
 // releasePrintStatus resets and returns ps to the pool.
-func releasePrintStatus(ps *printStatus) <span class="cov9" title="121141">{
+func releasePrintStatus(ps *printStatus) <span class="cov9" title="121142">{
         ps.rStatus = 0
         ps.nodeID = ""
         statusPool.Put(ps)
@@ -2924,17 +2924,17 @@ func (sc *SafeChannel[T]) Send(value T) bool <span class="cov5" title="360">{
 // select when Close() is called concurrently and the buffer is full — this
 // prevents a deadlock where Close() cannot acquire the write lock because
 // SendBlocking holds the read lock indefinitely.
-func (sc *SafeChannel[T]) SendBlocking(ctx context.Context, value T) bool <span class="cov10" title="161303">{
+func (sc *SafeChannel[T]) SendBlocking(ctx context.Context, value T) bool <span class="cov10" title="161300">{
         sc.mu.RLock()
         defer sc.mu.RUnlock()
 
-        if sc.closed </span><span class="cov3" title="29">{
+        if sc.closed </span><span class="cov3" title="36">{
                 return false
         }</span>
-        <span class="cov9" title="161274">select </span>{
-        case sc.ch &lt;- value:<span class="cov9" title="161250">
+        <span class="cov9" title="161264">select </span>{
+        case sc.ch &lt;- value:<span class="cov9" title="161251">
                 return true</span>
-        case &lt;-ctx.Done():<span class="cov3" title="23">
+        case &lt;-ctx.Done():<span class="cov2" title="12">
                 return false</span>
         case &lt;-sc.done:<span class="cov1" title="1">
                 return false</span>
@@ -2974,7 +2974,7 @@ func (sc *SafeChannel[T]) Close() (err error) <span class="cov9" title="60539">{
 }
 
 // GetChannel returns the underlying channel for range/select operations.
-func (sc *SafeChannel[T]) GetChannel() chan T <span class="cov9" title="120962">{
+func (sc *SafeChannel[T]) GetChannel() chan T <span class="cov9" title="120967">{
         return sc.ch
 }</span>
 </pre>
