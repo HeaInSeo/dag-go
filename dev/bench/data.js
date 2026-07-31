@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1785401860606,
+  "lastUpdate": 1785500973477,
   "repoUrl": "https://github.com/HeaInSeo/dag-go",
   "entries": {
     "dag-go benchmarks": [
@@ -3166,6 +3166,270 @@ window.BENCHMARK_DATA = {
             "value": 43,
             "unit": "allocs/op",
             "extra": "420286 times\n4 procs"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "126678443+HeaInSeo@users.noreply.github.com",
+            "name": "HeaInSeo",
+            "username": "HeaInSeo"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5be10ad429f067acf8157d0c03cc7861dd81786c",
+          "message": "test: add native Go fuzzing over graph construction/validation (#8)\n\nThe library's coverage is otherwise excellent (cycle detection,\ninvalid-graph handling, deadlock avoidance, cancel handling, and\ngoroutine-leak detection are all covered and CI-enforced under -race),\nbut had no fuzz testing - the one class of bug hand-picked table tests\nstructurally can't catch: a panic on some malformed/unexpected\ncombination of node IDs no one thought to write a test case for, in\nAddEdge/FinishDag/detectCycle/validateTopology.\n\nFuzzAddEdge and FuzzFinishDag turn a single fuzzed string into a\nbounded sequence of (from, to) edge pairs and build a graph from them,\nasserting only the implicit fuzzing invariant (no panic) - errors are\nexpected and ignored for most generated input. Verified locally with\n`go test -fuzz` for 30s each (~11M executions per target), no crashes.\n\nNo corresponding GitHub issue: HeaInSeo/dag-go has issues disabled, so\nthis was implemented directly rather than filed and deferred.\n\nCo-authored-by: HeaInSeo <seoyhaein@gmail.com>",
+          "timestamp": "2026-07-31T21:28:22+09:00",
+          "tree_id": "064f747d2f86a95ba283a5bc91134c04f6c0bd6a",
+          "url": "https://github.com/HeaInSeo/dag-go/commit/5be10ad429f067acf8157d0c03cc7861dd81786c"
+        },
+        "date": 1785500972537,
+        "tool": "go",
+        "benches": [
+          {
+            "name": "BenchmarkCopyDag_Small",
+            "value": 2848,
+            "unit": "ns/op\t    4488 B/op\t      55 allocs/op",
+            "extra": "1332309 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Small - ns/op",
+            "value": 2848,
+            "unit": "ns/op",
+            "extra": "1332309 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Small - B/op",
+            "value": 4488,
+            "unit": "B/op",
+            "extra": "1332309 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Small - allocs/op",
+            "value": 55,
+            "unit": "allocs/op",
+            "extra": "1332309 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Medium",
+            "value": 110224,
+            "unit": "ns/op\t  142072 B/op\t    1889 allocs/op",
+            "extra": "34641 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Medium - ns/op",
+            "value": 110224,
+            "unit": "ns/op",
+            "extra": "34641 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Medium - B/op",
+            "value": 142072,
+            "unit": "B/op",
+            "extra": "34641 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Medium - allocs/op",
+            "value": 1889,
+            "unit": "allocs/op",
+            "extra": "34641 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Large",
+            "value": 4391162,
+            "unit": "ns/op\t 3950649 B/op\t   53313 allocs/op",
+            "extra": "818 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Large - ns/op",
+            "value": 4391162,
+            "unit": "ns/op",
+            "extra": "818 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Large - B/op",
+            "value": 3950649,
+            "unit": "B/op",
+            "extra": "818 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkCopyDag_Large - allocs/op",
+            "value": 53313,
+            "unit": "allocs/op",
+            "extra": "818 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Small",
+            "value": 1026,
+            "unit": "ns/op\t       0 B/op\t       0 allocs/op",
+            "extra": "3573494 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Small - ns/op",
+            "value": 1026,
+            "unit": "ns/op",
+            "extra": "3573494 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Small - B/op",
+            "value": 0,
+            "unit": "B/op",
+            "extra": "3573494 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Small - allocs/op",
+            "value": 0,
+            "unit": "allocs/op",
+            "extra": "3573494 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Medium",
+            "value": 26709,
+            "unit": "ns/op\t       0 B/op\t       0 allocs/op",
+            "extra": "132304 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Medium - ns/op",
+            "value": 26709,
+            "unit": "ns/op",
+            "extra": "132304 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Medium - B/op",
+            "value": 0,
+            "unit": "B/op",
+            "extra": "132304 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Medium - allocs/op",
+            "value": 0,
+            "unit": "allocs/op",
+            "extra": "132304 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Large",
+            "value": 589542,
+            "unit": "ns/op\t       0 B/op\t       0 allocs/op",
+            "extra": "6087 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Large - ns/op",
+            "value": 589542,
+            "unit": "ns/op",
+            "extra": "6087 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Large - B/op",
+            "value": 0,
+            "unit": "B/op",
+            "extra": "6087 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkDetectCycle_Large - allocs/op",
+            "value": 0,
+            "unit": "allocs/op",
+            "extra": "6087 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Small",
+            "value": 5079,
+            "unit": "ns/op\t    2528 B/op\t      51 allocs/op",
+            "extra": "689533 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Small - ns/op",
+            "value": 5079,
+            "unit": "ns/op",
+            "extra": "689533 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Small - B/op",
+            "value": 2528,
+            "unit": "B/op",
+            "extra": "689533 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Small - allocs/op",
+            "value": 51,
+            "unit": "allocs/op",
+            "extra": "689533 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Medium",
+            "value": 16265,
+            "unit": "ns/op\t   12178 B/op\t     172 allocs/op",
+            "extra": "223387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Medium - ns/op",
+            "value": 16265,
+            "unit": "ns/op",
+            "extra": "223387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Medium - B/op",
+            "value": 12178,
+            "unit": "B/op",
+            "extra": "223387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Medium - allocs/op",
+            "value": 172,
+            "unit": "allocs/op",
+            "extra": "223387 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Large",
+            "value": 21283,
+            "unit": "ns/op\t   15587 B/op\t     215 allocs/op",
+            "extra": "164857 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Large - ns/op",
+            "value": 21283,
+            "unit": "ns/op",
+            "extra": "164857 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Large - B/op",
+            "value": 15587,
+            "unit": "B/op",
+            "extra": "164857 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkToMermaid_Large - allocs/op",
+            "value": 215,
+            "unit": "allocs/op",
+            "extra": "164857 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkPreFlight",
+            "value": 9277,
+            "unit": "ns/op\t    1873 B/op\t      43 allocs/op",
+            "extra": "370364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkPreFlight - ns/op",
+            "value": 9277,
+            "unit": "ns/op",
+            "extra": "370364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkPreFlight - B/op",
+            "value": 1873,
+            "unit": "B/op",
+            "extra": "370364 times\n4 procs"
+          },
+          {
+            "name": "BenchmarkPreFlight - allocs/op",
+            "value": 43,
+            "unit": "allocs/op",
+            "extra": "370364 times\n4 procs"
           }
         ]
       }
