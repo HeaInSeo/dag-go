@@ -121,6 +121,13 @@ func (sc *SafeChannel[T]) Close() (err error) {
 	return nil
 }
 
+// IsClosed reports whether Close has completed for this SafeChannel.
+func (sc *SafeChannel[T]) IsClosed() bool {
+	sc.mu.RLock()
+	defer sc.mu.RUnlock()
+	return sc.closed
+}
+
 // GetChannel returns the underlying channel for range/select operations.
 func (sc *SafeChannel[T]) GetChannel() chan T {
 	return sc.ch

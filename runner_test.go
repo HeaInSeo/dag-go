@@ -43,7 +43,7 @@ func (r echoOK) RunE(ctx context.Context, a interface{}) error {
 	}
 }
 
-func Test_lateBinding(t *testing.T) {
+func TestSetNodeRunner_AfterGetReadyRejected(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	dag, _ := InitDag()
@@ -65,17 +65,29 @@ func Test_lateBinding(t *testing.T) {
 		return nil
 	})
 
-	_ = dag.FinishDag()
-	_ = dag.ConnectRunner()
+	if err := dag.FinishDag(); err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	if !dag.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = dag.GetReady(ctx)
+	if !dag.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
 
-	// Override node "B" with a failing runner after GetReady but before Start.
-	// Because node "B" is still Pending, SetNodeRunner should accept the change.
-	dag.SetNodeRunner("B", echoFail{d: 150 * time.Millisecond})
+	// The DAG is frozen after GetReady. Even if B is still Pending, changing its
+	// runner here would make execution depend on scheduler timing.
+	if dag.SetNodeRunner("B", echoFail{d: 150 * time.Millisecond}) {
+		t.Fatal("SetNodeRunner after GetReady should be rejected")
+	}
 
-	_ = dag.Start()
-	_ = dag.Wait(ctx)
+	if !dag.Start() {
+		t.Fatal("Start failed")
+	}
+	if !dag.Wait(ctx) {
+		t.Fatal("Wait failed")
+	}
 }
