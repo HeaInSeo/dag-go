@@ -1539,6 +1539,7 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 	return dag.waitE(ctx) == nil
 }
 
+//nolint:gocognit,gocyclo // same fan-in select loop as Wait; returns detailed errors for WaitE
 func (dag *Dag) waitE(ctx context.Context) error {
 	if ctx == nil {
 		return fmt.Errorf("DAG execution failed: ctx is nil")

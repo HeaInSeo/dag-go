@@ -3900,10 +3900,12 @@ func TestGetters_Edges_StartNodeID_EndNodeID(t *testing.T) {
 		t.Errorf("Edges before AddEdge: got %d, want 0", len(edges))
 	}
 
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 
@@ -3962,10 +3964,12 @@ func TestStartE_BeforeGetReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDag: %v", err)
 	}
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 	d.SetContainerCmd(NoopCmd{})
@@ -3990,10 +3994,12 @@ func TestGetReadyE_UnexpectedStartParentVertex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDag: %v", err)
 	}
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 	d.SetContainerCmd(NoopCmd{})
@@ -4030,10 +4036,12 @@ func TestGetReadyE_ClosedEdgeChannel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDag: %v", err)
 	}
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 	d.SetContainerCmd(NoopCmd{})
@@ -4045,7 +4053,8 @@ func TestGetReadyE_ClosedEdgeChannel(t *testing.T) {
 	if edgeCh == nil {
 		t.Fatal("expected start_node -> A edge channel")
 	}
-	if err := edgeCh.Close(); err != nil {
+	err = edgeCh.Close()
+	if err != nil {
 		t.Fatalf("Close edge channel: %v", err)
 	}
 
@@ -4177,10 +4186,12 @@ func TestWaitE_DagTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDagWithOptions: %v", err)
 	}
-	if err := d.AddEdge(StartNode, "blocker"); err != nil {
+	err = d.AddEdge(StartNode, "blocker")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 	d.SetNodeRunner("blocker", ctxCancelRunnable{})
