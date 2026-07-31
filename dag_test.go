@@ -1892,6 +1892,20 @@ func TestNewDagWithOptions_Timeout(t *testing.T) {
 	}
 }
 
+// TestNewDagWithOptions_TimeoutZeroUsesCallerContext verifies that WithTimeout(0)
+// preserves the documented "no DAG-level timeout" behaviour.
+func TestNewDagWithOptions_TimeoutZeroUsesCallerContext(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	d := NewDagWithOptions(WithTimeout(0))
+	if d == nil {
+		t.Fatal("NewDagWithOptions returned nil")
+	}
+	if d.bTimeout {
+		t.Error("expected bTimeout=false after WithTimeout(0)")
+	}
+}
+
 // TestSafeChannel_Close_Twice verifies that calling Close on a SafeChannel
 // more than once does not panic (idempotent close via sync.Once).
 func TestSafeChannel_Close_Twice(t *testing.T) {
@@ -1914,6 +1928,23 @@ func TestSafeChannel_Send_Closed(t *testing.T) {
 	ok := sc.Send(42)
 	if ok {
 		t.Error("expected Send to return false on a closed channel")
+	}
+}
+
+// TestSafeChannel_IsClosed verifies the read-only closed-state observer used by
+// GetReadyE's pre-launch execution-channel validation.
+func TestSafeChannel_IsClosed(t *testing.T) {
+	defer goleak.VerifyNone(t)
+
+	sc := NewSafeChannelGen[int](1)
+	if sc.IsClosed() {
+		t.Error("new SafeChannel should not report closed")
+	}
+	if err := sc.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if !sc.IsClosed() {
+		t.Error("SafeChannel should report closed after Close")
 	}
 }
 
@@ -2079,6 +2110,12 @@ func TestDagOptions_ChannelBuffersAndWorkerPool(t *testing.T) {
 	}
 	if d.Config.WorkerPoolSize != 8 {
 		t.Errorf("expected WorkerPoolSize=8, got %d", d.Config.WorkerPoolSize)
+	}
+	if cap(d.NodesResult.GetChannel()) != 50 {
+		t.Errorf("expected NodesResult cap=50, got %d", cap(d.NodesResult.GetChannel()))
+	}
+	if cap(d.Errors.GetChannel()) != 50 {
+		t.Errorf("expected Errors cap=50, got %d", cap(d.Errors.GetChannel()))
 	}
 }
 
@@ -3863,10 +3900,12 @@ func TestGetters_Edges_StartNodeID_EndNodeID(t *testing.T) {
 		t.Errorf("Edges before AddEdge: got %d, want 0", len(edges))
 	}
 
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 
@@ -3925,10 +3964,12 @@ func TestStartE_BeforeGetReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDag: %v", err)
 	}
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 	d.SetContainerCmd(NoopCmd{})
@@ -3953,10 +3994,12 @@ func TestGetReadyE_UnexpectedStartParentVertex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InitDag: %v", err)
 	}
-	if err := d.AddEdge(StartNode, "A"); err != nil {
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
-	if err := d.FinishDag(); err != nil {
+	err = d.FinishDag()
+	if err != nil {
 		t.Fatalf("FinishDag: %v", err)
 	}
 	d.SetContainerCmd(NoopCmd{})
@@ -3979,6 +4022,57 @@ func TestGetReadyE_UnexpectedStartParentVertex(t *testing.T) {
 	// startTrigger must also remain nil.
 	if d.startTrigger != nil {
 		t.Error("startTrigger must be nil after GetReadyE validation failure")
+	}
+}
+
+// TestGetReadyE_ClosedEdgeChannel verifies that GetReadyE rejects a closed edge
+// channel before launching goroutines. preFlight stays on the fast receive path;
+// closed-channel corruption is caught while the DAG is still quiescent.
+func TestGetReadyE_ClosedEdgeChannel(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDag()
+	if err != nil {
+		t.Fatalf("InitDag: %v", err)
+	}
+	err = d.AddEdge(StartNode, "A")
+	if err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	err = d.FinishDag()
+	if err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetContainerCmd(NoopCmd{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	edgeCh := d.getSafeVertex(StartNode, "A")
+	if edgeCh == nil {
+		t.Fatal("expected start_node -> A edge channel")
+	}
+	err = edgeCh.Close()
+	if err != nil {
+		t.Fatalf("Close edge channel: %v", err)
+	}
+
+	err = d.GetReadyE(context.Background())
+	if err == nil {
+		t.Fatal("GetReadyE should reject a closed edge channel")
+	}
+	if !strings.Contains(err.Error(), "channel is closed") {
+		t.Errorf("expected closed-channel error, got: %v", err)
+	}
+	if d.nodeResult != nil {
+		t.Error("nodeResult must remain nil when GetReadyE rejects a closed edge channel")
+	}
+	if d.running.Load() {
+		t.Error("running must remain false when GetReadyE rejects a closed edge channel")
+	}
+	if d.startTrigger != nil {
+		t.Error("startTrigger must remain nil when GetReadyE rejects a closed edge channel")
 	}
 }
 
@@ -4079,6 +4173,48 @@ func TestWaitE_ContextCancelled(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Errorf("WaitE error should wrap context.Canceled, got: %v", err)
+	}
+}
+
+// TestWaitE_DagTimeout verifies that the DAG-level WithTimeout deadline is
+// preserved as context.DeadlineExceeded by WaitE.
+func TestWaitE_DagTimeout(t *testing.T) {
+	defer goleak.VerifyNone(t)
+	Log.SetOutput(io.Discard)
+
+	d, err := InitDagWithOptions(WithTimeout(20 * time.Millisecond))
+	if err != nil {
+		t.Fatalf("InitDagWithOptions: %v", err)
+	}
+	err = d.AddEdge(StartNode, "blocker")
+	if err != nil {
+		t.Fatalf("AddEdge: %v", err)
+	}
+	err = d.FinishDag()
+	if err != nil {
+		t.Fatalf("FinishDag: %v", err)
+	}
+	d.SetNodeRunner("blocker", ctxCancelRunnable{})
+	if !d.ConnectRunner() {
+		t.Fatal("ConnectRunner failed")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if !d.GetReady(ctx) {
+		t.Fatal("GetReady failed")
+	}
+	if !d.Start() {
+		t.Fatal("Start failed")
+	}
+
+	err = d.WaitE(ctx)
+	if err == nil {
+		t.Fatal("WaitE should return an error when DAG-level timeout expires")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("WaitE error should wrap context.DeadlineExceeded, got: %v", err)
 	}
 }
 

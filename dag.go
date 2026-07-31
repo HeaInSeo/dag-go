@@ -359,6 +359,8 @@ func NewDagWithOptions(options ...DagOption) *Dag {
 	}
 	// Re-normalise after options may have set invalid values (e.g. WithWorkerPool(0)).
 	dag.Config = normalizeDagConfig(dag.Config)
+	dag.NodesResult = NewSafeChannelGen[*printStatus](dag.Config.MaxChannelBuffer)
+	dag.Errors = NewSafeChannelGen[error](dag.Config.MaxChannelBuffer)
 
 	return dag
 }
@@ -544,7 +546,7 @@ func InitDagWithOptions(options ...DagOption) (*Dag, error) {
 func WithTimeout(timeout time.Duration) DagOption {
 	return func(dag *Dag) {
 		dag.Timeout = timeout
-		dag.bTimeout = true
+		dag.bTimeout = timeout > 0
 	}
 }
 
@@ -1426,6 +1428,9 @@ func (dag *Dag) GetReadyE(ctx context.Context) error {
 		return fmt.Errorf("GetReady: startNode has unexpected parentVertex length %d (want 1)",
 			len(dag.startNode.parentVertex))
 	}
+	if err := dag.validateExecutionChannels(); err != nil {
+		return err
+	}
 	dag.startTrigger = dag.startNode.parentVertex[0]
 	dag.execSem = make(chan struct{}, dag.Config.WorkerPoolSize)
 	// Set running=true before launching goroutines so that Reset is blocked
@@ -1445,6 +1450,18 @@ func (dag *Dag) GetReadyE(ctx context.Context) error {
 	}
 
 	dag.nodeResult = safeChs
+	return nil
+}
+
+func (dag *Dag) validateExecutionChannels() error {
+	for _, edge := range dag.edges {
+		if edge.safeVertex == nil {
+			return fmt.Errorf("GetReady: edge [%s -> %s] has nil channel", edge.parentID, edge.childID)
+		}
+		if edge.safeVertex.IsClosed() {
+			return fmt.Errorf("GetReady: edge [%s -> %s] channel is closed", edge.parentID, edge.childID)
+		}
+	}
 	return nil
 }
 
@@ -1519,12 +1536,17 @@ func (dag *Dag) Start() bool {
 //
 //nolint:gocognit,gocyclo // fan-in select loop must handle merge result, node status stream, and context cancellation simultaneously
 func (dag *Dag) Wait(ctx context.Context) bool {
+	return dag.waitE(ctx) == nil
+}
+
+//nolint:gocognit,gocyclo // same fan-in select loop as Wait; returns detailed errors for WaitE
+func (dag *Dag) waitE(ctx context.Context) error {
 	if ctx == nil {
-		return false
+		return fmt.Errorf("DAG execution failed: ctx is nil")
 	}
 	// Guard against calling Wait before GetReady (nodeResult not initialised).
 	if dag.nodeResult == nil {
-		return false
+		return fmt.Errorf("DAG execution failed: call GetReady before Wait")
 	}
 
 	// Cleanup: three sequential steps inside one defer; order is significant.
@@ -1567,13 +1589,13 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 			// merge 함수가 완료되어 결과를 반환한 경우,
 			// false 이면 병합 작업에 실패한 것이므로 false 리턴.
 			if !ok {
-				return false
+				return fmt.Errorf("DAG execution failed: result merge failed")
 			}
 			// merge 함수 결과가 true 면 계속 진행한다.
 		case c, ok := <-dag.NodesResult.GetChannel():
 			if !ok {
 				// 채널이 종료되면 실패 처리.
-				return false
+				return fmt.Errorf("DAG execution failed: NodesResult channel closed unexpectedly")
 			}
 			// EndNode 에 대한 상태만 체크함.
 			if c.nodeID == EndNode {
@@ -1585,17 +1607,17 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 					rStatus == InFlightFailed ||
 					rStatus == PostFlightFailed ||
 					rStatus == DependencySkipped {
-					return false
+					return fmt.Errorf("DAG execution failed: end node reported status %v", rStatus)
 				}
 				if rStatus == FlightEnd {
-					return true
+					return nil
 				}
 			} else {
 				releasePrintStatus(c)
 			}
 		case <-waitCtx.Done():
 			Log.Printf("DAG execution timed out or canceled: %v", waitCtx.Err())
-			return false
+			return fmt.Errorf("DAG execution cancelled: %w", waitCtx.Err())
 		}
 	}
 }
@@ -1604,13 +1626,7 @@ func (dag *Dag) Wait(ctx context.Context) bool {
 // completes successfully (FlightEnd from end_node), or a descriptive error on
 // context cancellation, timeout, or node failure.
 func (dag *Dag) WaitE(ctx context.Context) error {
-	if !dag.Wait(ctx) {
-		if ctx.Err() != nil {
-			return fmt.Errorf("DAG execution cancelled: %w", ctx.Err())
-		}
-		return fmt.Errorf("DAG execution failed; inspect dag.Errors for node-level failures")
-	}
-	return nil
+	return dag.waitE(ctx)
 }
 
 // dfsState holds the per-traversal book-keeping maps used by detectCycleDFS.
